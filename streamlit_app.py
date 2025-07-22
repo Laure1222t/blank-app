@@ -1,415 +1,390 @@
 import streamlit as st
-import PyPDF2
+from PyPDF2 import PdfReader
+from difflib import HtmlDiff, SequenceMatcher
+import base64
 import re
-import string
 from collections import defaultdict
-import jieba
-import jieba.analyse
-import matplotlib.pyplot as plt
-import numpy as np
-from wordcloud import WordCloud
-import spacy
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 
-# 设置页面配置
+# 设置页面标题和图标
 st.set_page_config(
-    page_title="中文PDF条款解析与合规性分析工具",
+    page_title="PDF条款合规性分析工具",
     page_icon="📄",
     layout="wide"
 )
 
-# 设置中文字体
-plt.rcParams["font.family"] = ["SimHei", "WenQuanYi Micro Hei", "Heiti TC"]
-plt.rcParams["axes.unicode_minus"] = False
+# 自定义CSS样式
+st.markdown("""
+<style>
+    .stApp { max-width: 1200px; margin: 0 auto; }
+    .stFileUploader { width: 100%; }
+    .highlight-add { background-color: #d4edda; }
+    .highlight-remove { background-color: #f8d7da; }
+    .highlight-conflict { background-color: #ffeeba; padding: 2px 4px; border-radius: 3px; }
+    .diff-container { border: 1px solid #ddd; border-radius: 5px; padding: 15px; }
+    .clause-box { border-left: 4px solid #007bff; padding: 10px; margin: 10px 0; background-color: #f8f9fa; }
+    .compliance-ok { border-left: 4px solid #28a745; }
+    .compliance-warning { border-left: 4px solid #ffc107; }
+    .compliance-conflict { border-left: 4px solid #dc3545; }
+</style>
+""", unsafe_allow_html=True)
 
-# 加载中文停用词
-def load_chinese_stopwords():
-    """加载中文停用词"""
-    stopwords_list = [
-        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个", "上", "也", 
-        "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这", "与", "及", "等",
-        "可以", "我们", "对于", "进行", "可能", "表示", "认为", "提出", "问题", "方法", "研究", "通过",
-        "第", "条", "款", "项", "规定", "内容", "如下", "所示", "包括", "其中", "并且", "同时", "此外"
-    ]
-    return set(stopwords_list)
-
-stop_words = load_chinese_stopwords()
-
-# 提取PDF文本
-def extract_text_from_pdf(pdf_file):
-    """从PDF文件中提取文本内容"""
+def extract_text_from_pdf(file):
+    """从PDF提取文本"""
     try:
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        pdf_reader = PdfReader(file)
         text = ""
-        for page_num, page in enumerate(pdf_reader.pages, 1):
-            page_text = page.extract_text()
-            if page_text:
-                text += f"\n--- 第 {page_num} 页 ---\n"
-                text += page_text
+        for page in pdf_reader.pages:
+            text += page.extract_text() or ""  # 处理可能为None的情况
         return text
     except Exception as e:
-        st.error(f"提取PDF文本时出错: {str(e)}")
+        st.error(f"提取文本失败: {str(e)}")
         return ""
 
-# 文本预处理
-def preprocess_text(text):
-    """预处理中文文本"""
-    # 去除特殊字符和多余空格
-    text = re.sub(r'\s+', ' ', text).strip()
-    # 去除标点
-    text = text.translate(str.maketrans('', '', string.punctuation))
-    # 分词
-    words = jieba.cut(text)
-    # 过滤停用词和短词
-    filtered_words = [word for word in words if word not in stop_words and len(word) > 1]
-    return " ".join(filtered_words)
-
-# 条款提取
-def extract_clauses(text):
-    """从文本中提取条款"""
-    # 匹配条款的正则表达式模式 (如"第一条"、"1."、"1.1"等)
-    clause_patterns = [
-        r'(第[一二三四五六七八九十百千万]+条)',  # 中文数字条款，如"第一条"
-        r'(\d+\.)',  # 数字加点，如"1."
-        r'(\d+\.\d+)',  # 数字加.加数字，如"1.1"
-        r'(第\d+条)'  # 数字条款，如"第1条"
+def split_into_clauses(text):
+    """将文本分割为条款，尝试识别标准条款格式"""
+    # 尝试识别多种条款格式：1. 2. 3. 或 (1) (2) (3) 或 第一条 第二条 等
+    patterns = [
+        r'(\d+\.\s+.*?)(?=\d+\.\s+|$)',  # 1. 2. 3. 格式
+        r'([一二三四五六七八九十]+、\s+.*?)(?=[一二三四五六七八九十]+、\s+|$)',  # 一、二、三、格式
+        r'((?:第)?[一二三四五六七八九十]+条\s+.*?)(?=(?:第)?[一二三四五六七八九十]+条\s+|$)',  # 第一条 第二条 格式
+        r'(\([1-9]+\)\s+.*?)(?=\([1-9]+\)\s+|$)'  # (1) (2) (3) 格式
     ]
     
-    clauses = []
-    current_clause = {"title": "", "content": ""}
-    current_title = ""
+    for pattern in patterns:
+        clauses = re.findall(pattern, text, re.DOTALL)
+        if len(clauses) > 3:  # 如果找到足够多的条款，使用这种分割方式
+            return [clause.strip() for clause in clauses if clause.strip()]
     
-    # 按行处理文本
-    lines = text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-            
-        # 检查是否为条款标题
-        matched = False
-        for pattern in clause_patterns:
-            matches = re.findall(pattern, line)
-            if matches:
-                # 如果有当前条款，先保存
-                if current_clause["title"]:
-                    clauses.append(current_clause)
+    # 如果没有识别到条款格式，按段落分割
+    paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+    return paragraphs
+
+def match_clauses(clauses1, clauses2):
+    """匹配两个文档中的相似条款"""
+    matched_pairs = []
+    used_indices = set()
+    
+    # 为文档1中的每个条款找到文档2中最相似的未匹配条款
+    for i, clause1 in enumerate(clauses1):
+        best_match = None
+        best_ratio = 0.3  # 设置最低匹配阈值
+        best_j = -1
+        
+        for j, clause2 in enumerate(clauses2):
+            if j not in used_indices:
+                ratio = SequenceMatcher(None, clause1, clause2).ratio()
+                if ratio > best_ratio and ratio > best_ratio:
+                    best_ratio = ratio
+                    best_match = clause2
+                    best_j = j
+        
+        if best_match:
+            matched_pairs.append((clause1, best_match, best_ratio))
+            used_indices.add(best_j)
+    
+    # 收集未匹配的条款
+    unmatched1 = [clause for i, clause in enumerate(clauses1) 
+                 if i not in [p[0] for p in [(idx, pair) for idx, pair in enumerate(matched_pairs)]]]
+    unmatched2 = [clause for j, clause in enumerate(clauses2) if j not in used_indices]
+    
+    return matched_pairs, unmatched1, unmatched2
+
+def analyze_compliance(clause1, clause2):
+    """分析两个条款之间的合规性，判断是否存在冲突"""
+    # 简单的冲突检测逻辑，可以根据实际需求扩展
+    conflict_indicators = [
+        (r'不得|禁止|严禁', r'可以|允许|有权'),
+        (r'必须|应当', r'无需|不必|不应当'),
+        (r'小于|低于|不超过', r'大于|高于|不少于'),
+        (r'全部|所有', r'部分|个别'),
+        (r'有效|生效', r'无效|失效')
+    ]
+    
+    conflicts = []
+    
+    for pattern1, pattern2 in conflict_indicators:
+        if re.search(pattern1, clause1, re.IGNORECASE) and re.search(pattern2, clause2, re.IGNORECASE):
+            conflicts.append(f"检测到潜在冲突: 文档1包含'{pattern1}'相关表述，文档2包含'{pattern2}'相关表述")
+        if re.search(pattern2, clause1, re.IGNORECASE) and re.search(pattern1, clause2, re.IGNORECASE):
+            conflicts.append(f"检测到潜在冲突: 文档1包含'{pattern2}'相关表述，文档2包含'{pattern1}'相关表述")
+    
+    # 计算相似度
+    similarity = SequenceMatcher(None, clause1, clause2).ratio()
+    
+    # 根据冲突和相似度判断合规性等级
+    if conflicts:
+        return "冲突", conflicts, similarity
+    elif similarity > 0.8:
+        return "一致", [], similarity
+    elif similarity > 0.5:
+        return "基本一致", [], similarity
+    else:
+        return "差异较大", [], similarity
+
+def create_download_link(content, filename, text):
+    """生成下载链接"""
+    b64 = base64.b64encode(content.encode()).decode()
+    return f'<a href="data:file/txt;base64,{b64}" download="{filename}">{text}</a>'
+
+def show_compliance_analysis(text1, text2, filename1, filename2):
+    """显示合规性分析结果"""
+    # 分割条款
+    with st.spinner("正在分析条款结构..."):
+        clauses1 = split_into_clauses(text1)
+        clauses2 = split_into_clauses(text2)
+        
+        st.success(f"条款分析完成: {filename1} 识别出 {len(clauses1)} 条条款，{filename2} 识别出 {len(clauses2)} 条条款")
+    
+    # 匹配条款并分析合规性
+    with st.spinner("正在匹配条款并进行合规性分析..."):
+        matched_pairs, unmatched1, unmatched2 = match_clauses(clauses1, clauses2)
+        
+        # 分析每个匹配对的合规性
+        analyzed_pairs = []
+        for clause1, clause2, ratio in matched_pairs:
+            compliance, conflicts, similarity = analyze_compliance(clause1, clause2)
+            analyzed_pairs.append({
+                "clause1": clause1,
+                "clause2": clause2,
+                "similarity": similarity,
+                "compliance": compliance,
+                "conflicts": conflicts
+            })
+        
+        # 按合规性排序，冲突的条款优先显示
+        analyzed_pairs.sort(key=lambda x: ["冲突", "差异较大", "基本一致", "一致"].index(x["compliance"]))
+    
+    # 显示总体统计
+    st.divider()
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("文档1条款数", len(clauses1))
+    col2.metric("文档2条款数", len(clauses2))
+    col3.metric("匹配条款数", len(matched_pairs))
+    conflict_count = sum(1 for p in analyzed_pairs if p["compliance"] == "冲突")
+    col4.metric("潜在冲突数", conflict_count)
+    
+    # 显示条款对比和合规性分析
+    st.divider()
+    st.subheader("📊 条款合规性详细分析")
+    
+    # 显示有冲突的条款
+    if any(p["compliance"] == "冲突" for p in analyzed_pairs):
+        st.warning(f"发现 {conflict_count} 处潜在冲突条款，请重点关注")
+        with st.expander("查看冲突条款", expanded=True):
+            for i, pair in enumerate([p for p in analyzed_pairs if p["compliance"] == "冲突"]):
+                st.markdown(f"### 冲突条款 {i+1}")
+                st.markdown(f'<div class="clause-box compliance-conflict"><strong>{filename1} 条款:</strong><br>{pair["clause1"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="clause-box compliance-conflict"><strong>{filename2} 条款:</strong><br>{pair["clause2"]}</div>', unsafe_allow_html=True)
                 
-                # 新条款
-                current_title = matches[0]
-                current_clause = {
-                    "title": current_title,
-                    "content": line.replace(current_title, "").strip()
-                }
-                matched = True
-                break
-        
-        # 如果不是条款标题，添加到当前条款内容
-        if not matched and current_title:
-            current_clause["content"] += " " + line
-    
-    # 添加最后一个条款
-    if current_clause["title"]:
-        clauses.append(current_clause)
-    
-    return clauses
-
-# 提取关键词
-def extract_keywords(text, top_n=5):
-    """提取文本关键词"""
-    return jieba.analyse.extract_tags(text, topK=top_n, withWeight=False)
-
-# 合规性分析
-def analyze_compliance(clauses_a, clauses_b):
-    """分析两个文件条款之间的合规性"""
-    # 创建条款标题到内容的映射
-    clauses_a_dict = {clause["title"]: clause for clause in clauses_a}
-    clauses_b_dict = {clause["title"]: clause for clause in clauses_b}
-    
-    # 所有条款标题
-    all_titles = set(clauses_a_dict.keys()).union(set(clauses_b_dict.keys()))
-    
-    # 结果分类
-    results = {
-        "consistent": [],  # 一致的条款
-        "conflicting": [],  # 冲突的条款
-        "only_a": [],       # 仅在A中存在的条款
-        "only_b": [],       # 仅在B中存在的条款
-        "similar": []       # 相似但标题不同的条款
-    }
-    
-    # 分析相同标题的条款
-    for title in all_titles:
-        in_a = title in clauses_a_dict
-        in_b = title in clauses_b_dict
-        
-        if in_a and in_b:
-            # 两个文件都有此条款，比较内容
-            content_a = clauses_a_dict[title]["content"]
-            content_b = clauses_b_dict[title]["content"]
-            
-            # 预处理文本
-            processed_a = preprocess_text(content_a)
-            processed_b = preprocess_text(content_b)
-            
-            # 计算相似度
-            if not processed_a or not processed_b:
-                similarity = 0.0
-            else:
-                vectorizer = TfidfVectorizer()
-                tfidf_matrix = vectorizer.fit_transform([processed_a, processed_b])
-                similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-            
-            # 提取关键词
-            keywords_a = extract_keywords(content_a)
-            keywords_b = extract_keywords(content_b)
-            
-            # 判断是否冲突（基于相似度阈值）
-            if similarity > 0.7:
-                results["consistent"].append({
-                    "title": title,
-                    "content_a": content_a,
-                    "content_b": content_b,
-                    "similarity": similarity,
-                    "keywords_a": keywords_a,
-                    "keywords_b": keywords_b
-                })
-            else:
-                results["conflicting"].append({
-                    "title": title,
-                    "content_a": content_a,
-                    "content_b": content_b,
-                    "similarity": similarity,
-                    "keywords_a": keywords_a,
-                    "keywords_b": keywords_b
-                })
-        
-        elif in_a:
-            # 仅在A中存在
-            results["only_a"].append(clauses_a_dict[title])
-        
-        elif in_b:
-            # 仅在B中存在
-            results["only_b"].append(clauses_b_dict[title])
-    
-    # 查找相似但标题不同的条款
-    a_titles = [t for t in clauses_a_dict.keys() if t not in clauses_b_dict.keys()]
-    b_titles = [t for t in clauses_b_dict.keys() if t not in clauses_a_dict.keys()]
-    
-    for a_title in a_titles:
-        content_a = clauses_a_dict[a_title]["content"]
-        processed_a = preprocess_text(content_a)
-        
-        for b_title in b_titles:
-            content_b = clauses_b_dict[b_title]["content"]
-            processed_b = preprocess_text(content_b)
-            
-            if processed_a and processed_b:
-                vectorizer = TfidfVectorizer()
-                tfidf_matrix = vectorizer.fit_transform([processed_a, processed_b])
-                similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+                st.markdown("**冲突分析:**")
+                for conflict in pair["conflicts"]:
+                    st.markdown(f'- <span class="highlight-conflict">{conflict}</span>', unsafe_allow_html=True)
                 
-                if similarity > 0.6:  # 相似但标题不同的阈值
-                    results["similar"].append({
-                        "title_a": a_title,
-                        "title_b": b_title,
-                        "content_a": content_a,
-                        "content_b": content_b,
-                        "similarity": similarity
-                    })
+                st.markdown(f"**相似度:** {pair['similarity']:.2%}")
+                st.divider()
     
-    return results
-
-# 生成词云
-def generate_wordcloud(text, title):
-    """生成中文词云"""
-    processed_text = preprocess_text(text)
-    if not processed_text:
-        return None
-        
-    wordcloud = WordCloud(
-        width=800, 
-        height=400, 
-        background_color='white',
-        font_path="simhei.ttf"
-    ).generate(processed_text)
+    # 显示其他合规性类别的条款
+    st.subheader("其他条款对比")
     
-    plt.figure(figsize=(10, 5))
-    plt.imshow(wordcloud, interpolation='bilinear')
-    plt.title(title)
-    plt.axis('off')
-    return plt
-
-# 主应用
-def main():
-    st.title("📄 中文PDF条款解析与合规性分析工具")
-    st.write("上传两个PDF文件，系统将解析条款并进行合规性分析，重点识别条款冲突")
+    # 差异较大的条款
+    with st.expander(f"差异较大的条款 ({sum(1 for p in analyzed_pairs if p['compliance'] == '差异较大')})"):
+        for i, pair in enumerate([p for p in analyzed_pairs if p["compliance"] == "差异较大"]):
+            st.markdown(f"### 差异条款 {i+1}")
+            st.markdown(f'<div class="clause-box"><strong>{filename1} 条款:</strong><br>{pair["clause1"]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="clause-box"><strong>{filename2} 条款:</strong><br>{pair["clause2"]}</div>', unsafe_allow_html=True)
+            st.markdown(f"**相似度:** {pair['similarity']:.2%}")
+            
+            # 显示文本差异
+            html_diff = HtmlDiff().make_file(
+                pair["clause1"].splitlines(), 
+                pair["clause2"].splitlines(),
+                fromdesc=filename1,
+                todesc=filename2
+            )
+            st.components.v1.html(html_diff, height=200, scrolling=True)
+            st.divider()
     
-    # 上传文件
+    # 基本一致的条款
+    with st.expander(f"基本一致的条款 ({sum(1 for p in analyzed_pairs if p['compliance'] == '基本一致')})"):
+        for i, pair in enumerate([p for p in analyzed_pairs if p["compliance"] == "基本一致"]):
+            st.markdown(f"### 条款 {i+1}")
+            st.markdown(f'<div class="clause-box compliance-warning"><strong>{filename1} 条款:</strong><br>{pair["clause1"]}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="clause-box compliance-warning"><strong>{filename2} 条款:</strong><br>{pair["clause2"]}</div>', unsafe_allow_html=True)
+            st.markdown(f"**相似度:** {pair['similarity']:.2%}")
+            st.divider()
+    
+    # 完全一致的条款
+    with st.expander(f"一致的条款 ({sum(1 for p in analyzed_pairs if p['compliance'] == '一致')})"):
+        for i, pair in enumerate([p for p in analyzed_pairs if p["compliance"] == "一致"]):
+            st.markdown(f"### 条款 {i+1}")
+            st.markdown(f'<div class="clause-box compliance-ok"><strong>条款内容:</strong><br>{pair["clause1"]}</div>', unsafe_allow_html=True)
+            st.markdown(f"**相似度:** {pair['similarity']:.2%}")
+            st.divider()
+    
+    # 未匹配的条款
+    st.subheader("未匹配条款")
     col1, col2 = st.columns(2)
     with col1:
-        pdf_file1 = st.file_uploader("上传第一个PDF文件", type="pdf", key="file1")
+        with st.expander(f"{filename1} 中独有的条款 ({len(unmatched1)})"):
+            for i, clause in enumerate(unmatched1):
+                st.markdown(f"**条款 {i+1}:**")
+                st.text_area("", clause, height=100, label_visibility="collapsed")
+                st.divider()
+    
     with col2:
-        pdf_file2 = st.file_uploader("上传第二个PDF文件", type="pdf", key="file2")
+        with st.expander(f"{filename2} 中独有的条款 ({len(unmatched2)})"):
+            for i, clause in enumerate(unmatched2):
+                st.markdown(f"**条款 {i+1}:**")
+                st.text_area("", clause, height=100, label_visibility="collapsed")
+                st.divider()
     
-    if pdf_file1 and pdf_file2:
-        # 提取文本
-        with st.spinner("正在解析PDF文件..."):
-            text1 = extract_text_from_pdf(pdf_file1)
-            text2 = extract_text_from_pdf(pdf_file2)
-        
-        # 提取条款
-        with st.spinner("正在提取条款..."):
-            clauses1 = extract_clauses(text1)
-            clauses2 = extract_clauses(text2)
-        
-        # 显示条款提取结果
-        st.subheader("条款提取结果")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.info(f"从 {pdf_file1.name} 中提取到 {len(clauses1)} 条条款")
-            with st.expander(f"查看 {pdf_file1.name} 的所有条款"):
-                for i, clause in enumerate(clauses1, 1):
-                    st.write(f"**{clause['title']}**")
-                    st.write(clause['content'])
-                    st.write("---")
-        
-        with col2:
-            st.info(f"从 {pdf_file2.name} 中提取到 {len(clauses2)} 条条款")
-            with st.expander(f"查看 {pdf_file2.name} 的所有条款"):
-                for i, clause in enumerate(clauses2, 1):
-                    st.write(f"**{clause['title']}**")
-                    st.write(clause['content'])
-                    st.write("---")
-        
-        # 合规性分析
-        with st.spinner("正在进行合规性分析..."):
-            compliance_results = analyze_compliance(clauses1, clauses2)
-        
-        # 显示合规性分析结果
-        st.subheader("📊 合规性分析结果")
-        
-        # 冲突条款
-        st.write("### ⚠️ 存在冲突的条款")
-        if compliance_results["conflicting"]:
-            for item in compliance_results["conflicting"]:
-                with st.expander(f"条款 {item['title']} (相似度: {item['similarity']:.2f})"):
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.write(f"**{pdf_file1.name} 内容:**")
-                        st.write(item["content_a"])
-                        st.write(f"**关键词:** {', '.join(item['keywords_a'])}")
-                    with col_b:
-                        st.write(f"**{pdf_file2.name} 内容:**")
-                        st.write(item["content_b"])
-                        st.write(f"**关键词:** {', '.join(item['keywords_b'])}")
-                    st.markdown("**分析:** 两条款内容存在显著差异，可能存在合规性冲突，建议重点审查。")
-        else:
-            st.success("未发现存在冲突的条款")
-        
-        # 一致的条款
-        st.write("### ✅ 内容一致的条款")
-        if compliance_results["consistent"]:
-            for item in compliance_results["consistent"]:
-                with st.expander(f"条款 {item['title']} (相似度: {item['similarity']:.2f})"):
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.write(f"**{pdf_file1.name} 内容:**")
-                        st.write(item["content_a"])
-                    with col_b:
-                        st.write(f"**{pdf_file2.name} 内容:**")
-                        st.write(item["content_b"])
-        else:
-            st.info("未发现内容一致的条款")
-        
-        # 相似但标题不同的条款
-        st.write("### 🔄 相似但标题不同的条款")
-        if compliance_results["similar"]:
-            for item in compliance_results["similar"]:
-                with st.expander(f"条款 {item['title_a']} 与 {item['title_b']} (相似度: {item['similarity']:.2f})"):
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        st.write(f"**{pdf_file1.name} {item['title_a']}:**")
-                        st.write(item["content_a"])
-                    with col_b:
-                        st.write(f"**{pdf_file2.name} {item['title_b']}:**")
-                        st.write(item["content_b"])
-                    st.markdown("**分析:** 两条款内容相似但标题不同，可能是同一内容的不同表述，建议确认是否为同一条款。")
-        else:
-            st.info("未发现相似但标题不同的条款")
-        
-        # 仅在一个文件中存在的条款
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"### 📌 仅在 {pdf_file1.name} 中存在的条款")
-            if compliance_results["only_a"]:
-                for clause in compliance_results["only_a"]:
-                    with st.expander(clause["title"]):
-                        st.write(clause["content"])
-            else:
-                st.info(f"{pdf_file1.name} 中的所有条款在 {pdf_file2.name} 中都有对应条款")
-        
-        with col2:
-            st.write(f"### 📌 仅在 {pdf_file2.name} 中存在的条款")
-            if compliance_results["only_b"]:
-                for clause in compliance_results["only_b"]:
-                    with st.expander(clause["title"]):
-                        st.write(clause["content"])
-            else:
-                st.info(f"{pdf_file2.name} 中的所有条款在 {pdf_file1.name} 中都有对应条款")
-        
-        # 条款覆盖度分析
-        st.subheader("📈 条款覆盖度分析")
-        total_clauses = len(compliance_results["consistent"]) + len(compliance_results["conflicting"]) + len(compliance_results["only_a"]) + len(compliance_results["only_b"])
-        coverage = (len(compliance_results["consistent"]) + len(compliance_results["conflicting"])) / total_clauses * 100 if total_clauses > 0 else 0
-        
-        fig, ax = plt.subplots(figsize=(10, 6))
-        labels = ['一致条款', '冲突条款', f'仅{pdf_file1.name}', f'仅{pdf_file2.name}']
-        sizes = [
-            len(compliance_results["consistent"]),
-            len(compliance_results["conflicting"]),
-            len(compliance_results["only_a"]),
-            len(compliance_results["only_b"])
-        ]
-        colors = ['#4CAF50', '#F44336', '#2196F3', '#FFC107']
-        explode = (0.1, 0.1, 0, 0)
-        
-        ax.pie(sizes, explode=explode, labels=labels, colors=colors, autopct='%1.1f%%',
-                shadow=True, startangle=90)
-        ax.axis('equal')
-        plt.title(f'条款分布 (条款覆盖率: {coverage:.1f}%)')
-        st.pyplot(fig)
-        
-        # 词云对比
-        st.subheader("🔍 条款内容词云对比")
-        col1, col2 = st.columns(2)
-        with col1:
-            all_text1 = " ".join([clause["content"] for clause in clauses1])
-            wc1 = generate_wordcloud(all_text1, f"{pdf_file1.name} 条款词云")
-            if wc1:
-                st.pyplot(wc1)
-        
-        with col2:
-            all_text2 = " ".join([clause["content"] for clause in clauses2])
-            wc2 = generate_wordcloud(all_text2, f"{pdf_file2.name} 条款词云")
-            if wc2:
-                st.pyplot(wc2)
-        
-        # 合规性总结
-        st.subheader("📝 合规性分析总结")
-        st.info(f"""
-        分析总结:
-        1. 两个文件共比对出 {len(compliance_results["consistent"]) + len(compliance_results["conflicting"])} 条相同标题的条款
-        2. 其中 {len(compliance_results["consistent"])} 条内容一致，{len(compliance_results["conflicting"])} 条存在冲突
-        3. {pdf_file1.name} 有 {len(compliance_results["only_a"])} 条独有条款，{pdf_file2.name} 有 {len(compliance_results["only_b"])} 条独有条款
-        4. 发现 {len(compliance_results["similar"])} 对标题不同但内容相似的条款
-        
-        合规性风险提示:
-        - 存在 {len(compliance_results["conflicting"])} 条冲突条款，可能存在合规性问题，建议重点审查
-        - 两个文件的条款覆盖率为 {coverage:.1f}%，{'' if coverage > 70 else '覆盖率较低，'} 建议确认是否涵盖所有必要内容
-        """)
+    # 生成完整的HTML报告
+    full_report = generate_full_report(analyzed_pairs, unmatched1, unmatched2, filename1, filename2)
+    st.markdown(create_download_link(full_report, "compliance_report.html", "⬇️ 下载完整合规性分析报告(HTML)"), unsafe_allow_html=True)
 
-if __name__ == "__main__":
-    main()
+def generate_full_report(analyzed_pairs, unmatched1, unmatched2, filename1, filename2):
+    """生成完整的HTML报告"""
+    html = f"""
+    <html>
+    <head>
+        <title>PDF条款合规性分析报告</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }}
+            .header {{ text-align: center; margin-bottom: 30px; }}
+            .stats {{ display: flex; justify-content: space-around; margin: 20px 0; padding: 15px; background-color: #f5f5f5; border-radius: 5px; }}
+            .stat-box {{ text-align: center; }}
+            .clause-box {{ margin: 15px 0; padding: 10px; border-radius: 5px; }}
+            .compliance-ok {{ border-left: 4px solid #28a745; background-color: #f8f9fa; }}
+            .compliance-warning {{ border-left: 4px solid #ffc107; background-color: #f8f9fa; }}
+            .compliance-conflict {{ border-left: 4px solid #dc3545; background-color: #f8f9fa; }}
+            .highlight-conflict {{ background-color: #ffeeba; padding: 2px 4px; border-radius: 3px; }}
+            .section {{ margin: 30px 0; }}
+            .divider {{ border: 0; border-top: 1px solid #ddd; margin: 20px 0; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>PDF条款合规性分析报告</h1>
+            <p>对比文档: {filename1} 与 {filename2}</p>
+        </div>
+        
+        <div class="stats">
+            <div class="stat-box">
+                <h3>{filename1} 条款数</h3>
+                <p>{len([p for p in analyzed_pairs] + unmatched1)}</p>
+            </div>
+            <div class="stat-box">
+                <h3>{filename2} 条款数</h3>
+                <p>{len([p for p in analyzed_pairs] + unmatched2)}</p>
+            </div>
+            <div class="stat-box">
+                <h3>匹配条款数</h3>
+                <p>{len(analyzed_pairs)}</p>
+            </div>
+            <div class="stat-box">
+                <h3>潜在冲突数</h3>
+                <p>{sum(1 for p in analyzed_pairs if p["compliance"] == "冲突")}</p>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>冲突条款</h2>
+    """
     
+    # 添加冲突条款
+    for i, pair in enumerate([p for p in analyzed_pairs if p["compliance"] == "冲突"]):
+        html += f"""
+        <h3>冲突条款 {i+1}</h3>
+        <div class="clause-box compliance-conflict">
+            <strong>{filename1} 条款:</strong><br>
+            {pair["clause1"].replace('\n', '<br>')}
+        </div>
+        <div class="clause-box compliance-conflict">
+            <strong>{filename2} 条款:</strong><br>
+            {pair["clause2"].replace('\n', '<br>')}
+        </div>
+        <div>
+            <strong>冲突分析:</strong>
+            <ul>
+        """
+        for conflict in pair["conflicts"]:
+            html += f'<li><span class="highlight-conflict">{conflict}</span></li>'
+        html += f"""
+            </ul>
+            <strong>相似度:</strong> {pair['similarity']:.2%}
+        </div>
+        <hr class="divider">
+        """
+    
+    # 添加其他部分...
+    html += """
+        </div>
+        <div class="section">
+            <h2>完整分析请查看工具内详细内容</h2>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+# 应用主界面
+st.title("📄 PDF条款合规性分析工具")
+st.markdown("上传两个PDF文件，系统将自动解析条款并分析合规性冲突")
+
+with st.form("upload_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+        file1 = st.file_uploader("选择第一个PDF文件（基准文档）", type=["pdf"])
+    with col2:
+        file2 = st.file_uploader("选择第二个PDF文件（对比文档）", type=["pdf"])
+    
+    submitted = st.form_submit_button("开始合规性分析")
+
+if submitted and file1 and file2:
+    with st.spinner("正在解析PDF内容，请稍候..."):
+        text1 = extract_text_from_pdf(file1)
+        text2 = extract_text_from_pdf(file2)
+        
+        if not text1 or not text2:
+            st.error("无法提取文本内容，请确认PDF包含可提取的文本")
+        else:
+            show_compliance_analysis(text1, text2, file1.name, file2.name)
+else:
+    st.info('请上传两个PDF文件后点击"开始合规性分析"按钮')
+
+# 添加使用说明
+with st.expander("使用说明"):
+    st.markdown("""
+    1. 上传两个需要对比的PDF文件（建议先上传基准文档）
+    2. 点击"开始合规性分析"按钮
+    3. 系统会自动识别文档中的条款并进行匹配
+    4. 查看条款间的合规性分析结果，重点关注标记为"冲突"的条款
+    5. 可以下载完整的HTML格式分析报告
+    
+    **分析逻辑:**
+    - 系统会尝试识别文档中的条款结构（如1. 2. 3. 或第一条 第二条等格式）
+    - 对条款进行匹配并计算相似度
+    - 分析条款间是否存在语义冲突（如"必须"与"不必"、"允许"与"禁止"等）
+    - 按合规性程度分类展示：冲突、差异较大、基本一致、一致
+    
+    **注意:**
+    - 仅支持文本型PDF，扫描件需要OCR处理
+    - 条款识别精度取决于文档格式的规范性
+    - 合规性分析结果仅供参考，重要决策请结合人工审核
+    """)
+
+# 添加页脚
+st.divider()
+st.markdown("""
+<style>
+.footer {
+    font-size: 0.8rem;
+    color: #666;
+    text-align: center;
+    margin-top: 2rem;
+}
+</style>
+<div class="footer">
+    PDF条款合规性分析工具 | 使用Streamlit构建 | 数据不会保留在服务器
+</div>
+""", unsafe_allow_html=True)
