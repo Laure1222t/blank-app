@@ -10,11 +10,14 @@ import numpy as np
 from wordcloud import WordCloud
 import nltk
 from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
+import jieba  # 新增：用于中文分词
 
 # 确保下载NLTK所需资源
 nltk.download('stopwords', quiet=True)
-nltk.download('wordnet', quiet=True)
+
+# 设置matplotlib中文字体支持
+plt.rcParams["font.family"] = ["SimHei", "WenQuanYi Micro Hei", "Heiti TC"]
+plt.rcParams["axes.unicode_minus"] = False  # 正确显示负号
 
 # 设置页面配置
 st.set_page_config(
@@ -23,9 +26,23 @@ st.set_page_config(
     layout="wide"
 )
 
-# 初始化NLP工具
-stop_words = set(stopwords.words('english'))
-lemmatizer = WordNetLemmatizer()
+# 加载中文停用词
+def load_chinese_stopwords():
+    """加载中文停用词"""
+    # 基础中文停用词
+    stopwords_list = [
+        "的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一", "一个", "上", "也", 
+        "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这", "与", "及", "等",
+        "可以", "我们", "对于", "进行", "可能", "表示", "认为", "提出", "问题", "方法", "研究", "通过"
+    ]
+    
+    # 补充NLTK的英文停用词
+    stopwords_list.extend(stopwords.words('english'))
+    
+    return set(stopwords_list)
+
+# 初始化停用词集合
+stop_words = load_chinese_stopwords()
 
 # 标题
 st.title("📄 PDF解析与对比分析工具")
@@ -38,9 +55,9 @@ option = st.sidebar.selectbox(
 )
 
 # 文本预处理函数
-def preprocess_text(text):
-    """对文本进行预处理：小写化、去除标点、停用词和词形还原"""
-    # 转换为小写
+def preprocess_text(text, is_chinese=True):
+    """对文本进行预处理：支持中文分词、去除标点、停用词"""
+    # 转换为小写（仅对英文有效）
     text = text.lower()
     
     # 去除标点
@@ -49,13 +66,23 @@ def preprocess_text(text):
     # 去除数字
     text = re.sub(r'\d+', '', text)
     
-    # 分词
-    words = text.split()
+    # 去除特殊字符和多余空格
+    text = re.sub(r'\s+', ' ', text).strip()
     
-    # 去除停用词和词形还原
-    words = [lemmatizer.lemmatize(word) for word in words if word not in stop_words and len(word) > 2]
+    # 分词：中文使用jieba，英文使用空格分割
+    if is_chinese:
+        words = jieba.cut(text)
+    else:
+        words = text.split()
     
-    return words
+    # 过滤停用词和短词
+    filtered_words = []
+    for word in words:
+        # 过滤条件：不在停用词表中，长度大于1，不是纯空格
+        if word not in stop_words and len(word.strip()) > 1:
+            filtered_words.append(word.strip())
+    
+    return filtered_words
 
 # 提取PDF文本
 def extract_text_from_pdf(pdf_file):
@@ -68,11 +95,20 @@ def extract_text_from_pdf(pdf_file):
             text += page_text
     return text
 
+# 判断文本是否主要为中文
+def is_chinese_text(text):
+    """判断文本是否主要为中文"""
+    chinese_chars = re.findall(r'[\u4e00-\u9fff]', text)
+    return len(chinese_chars) / len(text) > 0.3 if text else True
+
 # 分析文本函数
 def analyze_text(text):
     """分析文本内容，返回统计信息"""
+    # 判断是否为中文文本
+    chinese = is_chinese_text(text)
+    
     # 预处理文本
-    words = preprocess_text(text)
+    words = preprocess_text(text, chinese)
     
     # 计算基本统计信息
     total_words = len(words)
@@ -85,13 +121,22 @@ def analyze_text(text):
         "unique_words": unique_words,
         "top_words": top_words,
         "word_freq": word_freq,
-        "words": words
+        "words": words,
+        "is_chinese": chinese
     }
 
 # 生成词云
 def generate_wordcloud(word_freq):
     """根据词频生成词云"""
-    wordcloud = WordCloud(width=800, height=400, background_color='white').generate_from_frequencies(word_freq)
+    # 配置中文词云
+    wordcloud = WordCloud(
+        width=800, 
+        height=400, 
+        background_color='white',
+        font_path="simhei.ttf",  # 尝试使用系统中的黑体字体
+        font_step=1,
+        max_words=100
+    ).generate_from_frequencies(word_freq)
     
     plt.figure(figsize=(10, 5))
     plt.imshow(wordcloud, interpolation='bilinear')
@@ -136,7 +181,7 @@ def compare_documents(doc_analyses):
 # PDF解析功能
 if option == "PDF解析":
     st.header("PDF解析")
-    st.write("上传PDF文件，系统将解析并分析其内容")
+    st.write("上传PDF文件，系统将解析并分析其内容（支持中英文）")
     
     pdf_file = st.file_uploader("选择PDF文件", type="pdf")
     
@@ -165,6 +210,7 @@ if option == "PDF解析":
             with col1:
                 st.metric("总词数", analysis["total_words"])
                 st.metric("独特词数", analysis["unique_words"])
+                st.metric("语言类型", "中文" if analysis["is_chinese"] else "英文")
             
             with col2:
                 st.write("高频词Top 10:")
@@ -184,7 +230,7 @@ if option == "PDF解析":
 # 多文件对比分析功能
 elif option == "多文件对比分析":
     st.header("多文件对比分析")
-    st.write("上传多个PDF文件，系统将对比分析它们的内容差异与共性")
+    st.write("上传多个PDF文件，系统将对比分析它们的内容差异与共性（支持中英文）")
     
     pdf_files = st.file_uploader("选择多个PDF文件", type="pdf", accept_multiple_files=True)
     
@@ -256,7 +302,8 @@ elif option == "多文件对比分析":
             stats_data = {
                 "文档名称": list(doc_analyses.keys()),
                 "总词数": [doc["total_words"] for doc in doc_analyses.values()],
-                "独特词数": [doc["unique_words"] for doc in doc_analyses.values()]
+                "独特词数": [doc["unique_words"] for doc in doc_analyses.values()],
+                "语言类型": ["中文" if doc["is_chinese"] else "英文" for doc in doc_analyses.values()]
             }
             st.dataframe(stats_data)
             
