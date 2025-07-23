@@ -3,11 +3,10 @@ from PyPDF2 import PdfReader
 import re
 import jieba
 import time
-import matplotlib.pyplot as plt
-import os
 from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
 import tempfile
+from collections import defaultdict
 
 # 设置页面配置 - 优先保证加载速度
 st.set_page_config(
@@ -15,10 +14,6 @@ st.set_page_config(
     page_icon="📄",
     layout="wide"
 )
-
-# 确保中文显示正常
-plt.rcParams["font.family"] = ["SimHei", "WenQuanYi Micro Hei", "Heiti TC"]
-plt.rcParams["axes.unicode_minus"] = False
 
 # 自定义CSS - 简化样式提高渲染速度
 st.markdown("""
@@ -28,19 +23,11 @@ st.markdown("""
     .clause-box.conflict { border-color: #dc3545; background-color: #fff5f5; }
     .clause-box.consistent { border-color: #28a745; background-color: #f8fff8; }
     .analysis-result { padding: 10px; border-radius: 5px; margin: 10px 0; }
+    .loading-spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(0,0,0,.3); border-radius: 50%; border-top-color: #000; animation: spin 1s ease-in-out infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .stat-box { margin: 10px 0; padding: 10px; border: 1px solid #eee; border-radius: 5px; }
 </style>
 """, unsafe_allow_html=True)
-
-# 检查并显示依赖状态
-def check_dependencies():
-    """检查关键依赖是否安装正确"""
-    try:
-        import rich
-        rich_version = rich.__version__
-        if not (rich_version >= "10.14.0" and rich_version < "14.0.0"):
-            st.warning(f"检测到不兼容的rich版本: {rich_version}，建议安装13.7.0版本")
-    except ImportError:
-        st.warning("未检测到rich库，请安装13.7.0版本")
 
 # 缓存Qwen模型加载 - 提高重复使用速度
 @st.cache_resource
@@ -175,24 +162,24 @@ def analyze_compliance_with_qwen(generator, tokenizer, benchmark_text, compare_t
     if not generator or not tokenizer:
         return "模型未加载，无法进行分析", False
     
-    # 构建简洁的提示词，减少模型计算量
+    # 构建简洁的提示词，引导模型生成结构化分析结果
     prompt = f"""
     任务：分析两个条款的合规性，判断是否存在冲突。
     基准条款：{benchmark_text[:500]}
     对比条款：{compare_text[:500]}
     
-    请回答：
-    1. 两条款的核心内容是否一致？
-    2. 如果存在差异，是否构成合规性冲突？
-    3. 简要说明理由（不超过200字）
+    请用以下格式输出结果：
+    1. 核心内容是否一致：是/否
+    2. 是否存在合规性冲突：是/否
+    3. 简要理由：[不超过200字的说明]
     """
     
     try:
-        # 优化生成参数，提高速度
+        # 控制生成参数，平衡速度和准确性
         result = generator(
             prompt,
             max_length=500,
-            temperature=0.3,  # 降低随机性，提高稳定性
+            temperature=0.3,  # 降低随机性
             top_p=0.8,
             repetition_penalty=1.1,
             do_sample=True,
@@ -201,9 +188,8 @@ def analyze_compliance_with_qwen(generator, tokenizer, benchmark_text, compare_t
         
         analysis = result[0]['generated_text'].replace(prompt, '').strip()
         
-        # 判断是否存在冲突
-        has_conflict = any(keyword in analysis for keyword in 
-                          ["冲突", "不一致", "不符合", "违背", "矛盾"])
+        # 简单解析是否存在冲突（根据关键词判断）
+        has_conflict = "存在合规性冲突：是" in analysis or "是否存在合规性冲突：是" in analysis
         
         return analysis, has_conflict
     except Exception as e:
@@ -212,11 +198,8 @@ def analyze_compliance_with_qwen(generator, tokenizer, benchmark_text, compare_t
 
 # 主应用
 def main():
-    # 检查依赖
-    check_dependencies()
-    
     st.title("📄 Qwen PDF合规性分析工具")
-    st.markdown("基于Qwen大模型的条款合规性分析，快速稳定")
+    st.markdown("基于Qwen大模型的条款合规性分析，快速稳定（无matplotlib依赖）")
     
     # 侧边栏 - 模型设置
     with st.sidebar:
@@ -275,11 +258,14 @@ def main():
         # 显示分析结果
         st.subheader("分析结果")
         
-        # 统计信息
+        # 统计信息（用纯文本和st.metric实现）
         total = len(matched_clauses)
         conflict_count = 0
         progress_bar = st.progress(0)
         status_text = st.empty()
+        
+        # 用字典统计分析结果
+        analysis_stats = defaultdict(int)
         
         # 批量处理条款，提高效率
         results = []
@@ -297,6 +283,9 @@ def main():
             
             if has_conflict:
                 conflict_count += 1
+                analysis_stats["冲突条款"] += 1
+            else:
+                analysis_stats["合规条款"] += 1
             
             results.append({
                 "title": clause["title"],
@@ -312,10 +301,17 @@ def main():
         progress_bar.empty()
         status_text.empty()
         
-        # 显示总体统计
+        # 显示总体统计（纯文本+st.metric）
         col1, col2 = st.columns(2)
         col1.metric("总匹配条款数", total)
         col2.metric("存在冲突的条款数", conflict_count)
+        
+        # 额外统计信息展示
+        st.subheader("统计概览")
+        with st.expander("查看详细统计"):
+            st.write("条款分析分布：")
+            for stat, count in analysis_stats.items():
+                st.write(f"- {stat}: {count} 条")
         
         # 显示详细结果
         st.subheader("条款详细分析")
@@ -345,3 +341,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
