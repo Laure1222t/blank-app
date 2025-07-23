@@ -28,10 +28,19 @@ st.markdown("""
     .clause-box.conflict { border-color: #dc3545; background-color: #fff5f5; }
     .clause-box.consistent { border-color: #28a745; background-color: #f8fff8; }
     .analysis-result { padding: 10px; border-radius: 5px; margin: 10px 0; }
-    .loading-spinner { display: inline-block; width: 20px; height: 20px; border: 3px solid rgba(0,0,0,.3); border-radius: 50%; border-top-color: #000; animation: spin 1s ease-in-out infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 """, unsafe_allow_html=True)
+
+# 检查并显示依赖状态
+def check_dependencies():
+    """检查关键依赖是否安装正确"""
+    try:
+        import rich
+        rich_version = rich.__version__
+        if not (rich_version >= "10.14.0" and rich_version < "14.0.0"):
+            st.warning(f"检测到不兼容的rich版本: {rich_version}，建议安装13.7.0版本")
+    except ImportError:
+        st.warning("未检测到rich库，请安装13.7.0版本")
 
 # 缓存Qwen模型加载 - 提高重复使用速度
 @st.cache_resource
@@ -203,6 +212,9 @@ def analyze_compliance_with_qwen(generator, tokenizer, benchmark_text, compare_t
 
 # 主应用
 def main():
+    # 检查依赖
+    check_dependencies()
+    
     st.title("📄 Qwen PDF合规性分析工具")
     st.markdown("基于Qwen大模型的条款合规性分析，快速稳定")
     
