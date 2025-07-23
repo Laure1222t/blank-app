@@ -211,7 +211,7 @@ def match_clauses(benchmark_clauses: List[str], target_clauses: List[str]) -> Tu
     
     progress_bar.empty()
     
-    # 优化未匹配条款计算
+    # 计算未匹配条款（仅用于统计，不进行分析）
     matched_bench_indices = {i for i, _ in enumerate(matched_pairs)}
     unmatched_bench = [
         clause for i, clause in enumerate(benchmark_clauses) 
@@ -260,15 +260,6 @@ def generate_analysis_report(analysis_results: Dict) -> str:
         report.append(f"目标条款：{target_clause}")
         report.append(f"分析结果：{analysis_results['compliance_analyses'][i] or '无分析结果'}\n")
     
-    # 未匹配条款
-    report.append("3. 未匹配条款")
-    report.append(f"基准独有的条款（{len(analysis_results['unmatched_bench'])}条）：")
-    for i, clause in enumerate(analysis_results['unmatched_bench'][:5]):
-        report.append(f"- {clause[:100]}...")
-    report.append(f"\n目标独有的条款（{len(analysis_results['unmatched_target'])}条）：")
-    for i, clause in enumerate(analysis_results['unmatched_target'][:5]):
-        report.append(f"- {clause[:100]}...")
-    
     return "\n".join(report)
 
 
@@ -308,7 +299,7 @@ def analyze_single_target(
     bench_name: str, target_name: str, 
     api_key: str, model: str
 ) -> Dict:
-    """分析单个目标文件（增加中间结果缓存）"""
+    """分析单个目标文件（只关注匹配条款）"""
     # 条款分割（复用已处理结果）
     bench_clauses = split_into_clauses(bench_text)
     target_clauses = split_into_clauses(target_text)
@@ -316,7 +307,7 @@ def analyze_single_target(
     # 条款匹配
     matched_pairs, unmatched_bench, unmatched_target = match_clauses(bench_clauses, target_clauses)
     
-    # 合规性分析（支持中断后继续）
+    # 合规性分析（仅针对匹配条款）
     compliance_analyses = []
     for i, (bench_clause, target_clause, ratio) in enumerate(matched_pairs):
         with st.expander(f"正在分析匹配对 {i + 1}/{len(matched_pairs)}（点击查看条款）", expanded=False):
@@ -348,7 +339,7 @@ def show_multi_target_analysis(
     bench_text: str, target_files: List, 
     bench_name: str, api_key: str, model: str
 ):
-    """显示多目标分析结果（增加筛选和下载）"""
+    """显示多目标分析结果（仅展示匹配条款分析）"""
     # 基准条款预处理（只处理一次）
     bench_clauses = split_into_clauses(bench_text)
     st.success(f"基准文件条款解析完成：{bench_name} 识别出 {len(bench_clauses)} 条条款")
@@ -387,14 +378,16 @@ def show_multi_target_analysis(
                 bench_text, target_text, bench_name, target_name, api_key, model
             )
         
-        # 统计信息卡片
-        col1, col2, col3 = st.columns(3)
+        # 统计信息卡片（保留未匹配条款数量统计，但不进行分析）
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.info(f"**{bench_name} 条款数**\n{result['bench_count']}")
         with col2:
             st.info(f"**{target_name} 条款数**\n{result['target_count']}")
         with col3:
             st.info(f"**匹配条款数**\n{result['matched_count']}")
+        with col4:
+            st.info(f"**未匹配条款数**\n{len(result['unmatched_bench']) + len(result['unmatched_target'])}")
 
         # 生成并提供报告下载
         report = generate_analysis_report(result)
@@ -403,68 +396,41 @@ def show_multi_target_analysis(
             unsafe_allow_html=True
         )
 
-        # 详细分析（带折叠面板）
+        # 详细分析（仅展示匹配条款）
         with st.expander("条款匹配及合规性分析（点击展开）", expanded=True):
-            for i in range(result["matched_count"]):
-                st.markdown(f"### 匹配对 {i+1}（相似度: {result['matched_pairs'][i][2]:.2%}）")
-                
-                # 条款对比展示
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.markdown(f'<div class="clause-box compliance-ok"><strong>{bench_name} 条款:</strong><br>{result["matched_pairs"][i][0]}</div>', unsafe_allow_html=True)
-                with col_b:
-                    st.markdown(f'<div class="clause-box"><strong>{target_name} 条款:</strong><br>{result["matched_pairs"][i][1]}</div>', unsafe_allow_html=True)
-                
-                # 合规性分析结果
-                if result["compliance_analyses"][i]:
-                    # 提取合规性结论用于快速标识
-                    analysis_text = result["compliance_analyses"][i]
-                    if "严重冲突" in analysis_text:
-                        badge_class = "compliance-conflict"
-                        badge_text = "严重冲突"
-                    elif "轻微冲突" in analysis_text:
-                        badge_class = "compliance-warning"
-                        badge_text = "轻微冲突"
-                    else:
-                        badge_class = "compliance-ok"
-                        badge_text = "无冲突"
+            if result["matched_count"] == 0:
+                st.info("未找到匹配的条款，无法进行合规性分析")
+            else:
+                for i in range(result["matched_count"]):
+                    st.markdown(f"### 匹配对 {i+1}（相似度: {result['matched_pairs'][i][2]:.2%}）")
                     
-                    st.markdown(f'<span class="status-badge {badge_class}">{badge_text}</span>', unsafe_allow_html=True)
-                    st.markdown(
-                        f'<div class="model-response"><strong>合规性分析:</strong><br>{analysis_text}</div>',
-                        unsafe_allow_html=True
-                    )
-                st.divider()
-
-        # 未匹配条款分析（带展开/折叠）
-        with st.expander(f"未匹配条款分析（点击展开）", expanded=False):
-            col_un1, col_un2 = st.columns(2)
-            
-            with col_un1:
-                st.markdown(f"#### {bench_name} 独有的条款（{len(result['unmatched_bench'])}）")
-                for i, clause in enumerate(result["unmatched_bench"][:5]):
-                    with st.expander(f"条款 {i+1}（点击查看分析）", expanded=False):
-                        st.markdown(f'<div class="clause-box">{clause}</div>', unsafe_allow_html=True)
-                        # 对未匹配的基准条款进行单独分析
-                        analysis = analyze_standalone_clause_with_qwen(clause, bench_name, api_key, model)
-                        if analysis:
-                            st.markdown(f'<div class="model-response"><strong>条款分析:</strong><br>{analysis}</div>', unsafe_allow_html=True)
-                
-                if len(result["unmatched_bench"]) > 5:
-                    st.info(f"共 {len(result['unmatched_bench'])} 条，仅显示前5条")
-
-            with col_un2:
-                st.markdown(f"#### {target_name} 独有的条款（{len(result['unmatched_target'])}）")
-                for i, clause in enumerate(result["unmatched_target"][:5]):
-                    with st.expander(f"条款 {i+1}（点击查看分析）", expanded=False):
-                        st.markdown(f'<div class="clause-box">{clause}</div>', unsafe_allow_html=True)
-                        # 对未匹配的目标条款进行单独分析
-                        analysis = analyze_standalone_clause_with_qwen(clause, target_name, api_key, model)
-                        if analysis:
-                            st.markdown(f'<div class="model-response"><strong>条款分析:</strong><br>{analysis}</div>', unsafe_allow_html=True)
-                
-                if len(result["unmatched_target"]) > 5:
-                    st.info(f"共 {len(result['unmatched_target'])} 条，仅显示前5条")
+                    # 条款对比展示
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.markdown(f'<div class="clause-box compliance-ok"><strong>{bench_name} 条款:</strong><br>{result["matched_pairs"][i][0]}</div>', unsafe_allow_html=True)
+                    with col_b:
+                        st.markdown(f'<div class="clause-box"><strong>{target_name} 条款:</strong><br>{result["matched_pairs"][i][1]}</div>', unsafe_allow_html=True)
+                    
+                    # 合规性分析结果
+                    if result["compliance_analyses"][i]:
+                        # 提取合规性结论用于快速标识
+                        analysis_text = result["compliance_analyses"][i]
+                        if "严重冲突" in analysis_text:
+                            badge_class = "compliance-conflict"
+                            badge_text = "严重冲突"
+                        elif "轻微冲突" in analysis_text:
+                            badge_class = "compliance-warning"
+                            badge_text = "轻微冲突"
+                        else:
+                            badge_class = "compliance-ok"
+                            badge_text = "无冲突"
+                        
+                        st.markdown(f'<span class="status-badge {badge_class}">{badge_text}</span>', unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="model-response"><strong>合规性分析:</strong><br>{analysis_text}</div>',
+                            unsafe_allow_html=True
+                        )
+                    st.divider()
 
 
 # 主界面优化
@@ -474,7 +440,7 @@ def main():
         st.session_state.analysis_results = {}
 
     st.title("📄 Qwen 中文PDF条款合规性分析工具（1对多）")
-    st.markdown("支持1个基准文件与多个目标文件的条款合规性比对，自动识别法律条款并分析差异")
+    st.markdown("支持1个基准文件与多个目标文件的条款合规性比对，仅分析匹配条款")
 
     # 侧边栏配置增强
     with st.sidebar:
