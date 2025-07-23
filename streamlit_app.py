@@ -237,34 +237,7 @@ def analyze_single_comparison(base_clauses, compare_text, base_name, compare_nam
         
         st.divider()
     
-    # 未匹配的条款分析
-    st.subheader("未匹配条款分析")
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown(f"#### {base_name} 中独有的条款 ({len(unmatched_base)})")
-        for i, clause in enumerate(unmatched_base):
-            st.markdown(f'<div class="clause-box"><strong>条款 {i+1}:</strong><br>{clause}</div>', unsafe_allow_html=True)
-            
-            with st.spinner("Qwen大模型正在分析此条款..."):
-                analysis = analyze_standalone_clause_with_qwen(clause, base_name, api_key)
-            
-            if analysis:
-                st.markdown('<div class="model-response"><strong>Qwen分析:</strong><br>' + analysis + '</div>', unsafe_allow_html=True)
-            st.divider()
-    
-    with col2:
-        st.markdown(f"#### {compare_name} 中独有的条款 ({len(unmatched_compare)})")
-        for i, clause in enumerate(unmatched_compare):
-            st.markdown(f'<div class="clause-box"><strong>条款 {i+1}:</strong><br>{clause}</div>', unsafe_allow_html=True)
-            
-            with st.spinner("Qwen大模型正在分析此条款..."):
-                analysis = analyze_standalone_clause_with_qwen(clause, compare_name, api_key)
-            
-            if analysis:
-                st.markdown('<div class="model-response"><strong>Qwen分析:</strong><br>' + analysis + '</div>', unsafe_allow_html=True)
-            st.divider()
-
+ 
 # 应用主界面
 st.title("📄 Qwen 中文PDF条款合规性分析工具")
 st.markdown("专为中文文档优化的智能条款合规性分析系统 - 支持一对多分析")
