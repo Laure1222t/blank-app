@@ -151,11 +151,7 @@ def match_clauses(clauses1, clauses2):
             matched_pairs.append((clause1, best_match, best_ratio))
             used_indices.add(best_j)
     
-    unmatched1 = [clause for i, clause in enumerate(clauses1) 
-                 if i not in [idx for idx, _ in enumerate(matched_pairs)]]
-    unmatched2 = [clause for j, clause in enumerate(clauses2) if j not in used_indices]
-    
-    return matched_pairs, unmatched1, unmatched2
+    return matched_pairs
 
 def create_download_link(content, filename, text):
     """生成下载链接"""
@@ -185,19 +181,6 @@ def analyze_compliance_with_qwen(clause1, clause2, filename1, filename2, api_key
     
     return call_qwen_api(prompt, api_key)
 
-def analyze_standalone_clause_with_qwen(clause, doc_name, api_key):
-    """使用Qwen大模型分析独立条款（未匹配的条款）"""
-    prompt = f"""
-    请分析以下中文条款的内容：
-    
-    {doc_name} 中的条款：{clause}
-    
-    请用中文评估该条款的主要内容、核心要求、潜在影响和可能存在的问题，
-    并给出简要分析和建议。分析时请注意中文表述的准确性和专业性。
-    """
-    
-    return call_qwen_api(prompt, api_key)
-
 def analyze_single_comparison(base_text, compare_text, base_filename, compare_filename, api_key):
     """分析单个基准文件与对比文件的合规性"""
     with st.spinner(f"正在分析 {compare_filename} 的条款结构..."):
@@ -208,7 +191,7 @@ def analyze_single_comparison(base_text, compare_text, base_filename, compare_fi
     
     # 匹配条款
     with st.spinner(f"正在匹配 {compare_filename} 与基准文件的相似条款..."):
-        matched_pairs, unmatched_base, unmatched_compare = match_clauses(base_clauses, compare_clauses)
+        matched_pairs = match_clauses(base_clauses, compare_clauses)
     
     # 显示总体统计
     st.divider()
