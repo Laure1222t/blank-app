@@ -15,7 +15,7 @@ st.set_page_config(
 
 # 页面标题
 st.title("📄 PDF条款合规性分析工具")
-st.write("上传中文PDF文件，分析条款合规性，并支持多文件对比分析")
+st.write("上传中文PDF文件，指定一个基准文件，分析其他文件与基准文件的条款合规性差异")
 
 # 侧边栏 - 模型配置
 with st.sidebar:
@@ -23,7 +23,7 @@ with st.sidebar:
     qwen_api_key = st.text_input("Qwen API 密钥", type="password")
     qwen_api_url = st.text_input("Qwen API 地址", value="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
     temperature = st.slider("生成温度", 0.0, 1.0, 0.3)
-    max_tokens = st.number_input("最大 tokens", 100, 2000, 1000)
+    max_tokens = st.number_input("最大 tokens", 100, 2000, 1500)
     
     st.divider()
     
@@ -71,7 +71,7 @@ def call_qwen_api(prompt, api_key, api_url, temperature=0.3, max_tokens=1000):
     data = {
         "model": "qwen-plus",  # 可根据需要更换为其他Qwen模型
         "messages": [
-            {"role": "system", "content": "你是一位专业的法律合规分析师，擅长分析中文法律文件和条款的合规性。"},
+            {"role": "system", "content": "你是一位专业的法律合规分析师，擅长分析中文法律文件和条款的合规性。你的任务是比较不同文件的条款，专注于合规性方面的异同。"},
             {"role": "user", "content": prompt}
         ],
         "temperature": temperature,
@@ -88,7 +88,7 @@ def call_qwen_api(prompt, api_key, api_url, temperature=0.3, max_tokens=1000):
         st.text(f"响应内容: {response.text if 'response' in locals() else '无响应'}")
         return None
 
-# 工具函数 - 分析单文件合规性
+# 工具函数 - 分析单个文件的合规性
 def analyze_single_file_compliance(text, compliance_standard, api_key, api_url, temperature, max_tokens):
     """分析单个文件的条款合规性"""
     if not text:
@@ -114,35 +114,43 @@ def analyze_single_file_compliance(text, compliance_standard, api_key, api_url, 
     
     return call_qwen_api(prompt, api_key, api_url, temperature, max_tokens)
 
-# 工具函数 - 对比分析多个文件
-def compare_multiple_files(texts, filenames, compliance_standard, api_key, api_url, temperature, max_tokens):
-    """对比分析多个文件的条款合规性"""
-    if len(texts) < 2:
-        st.warning("至少需要两个文件进行对比分析")
+# 工具函数 - 以一个文件为基准，对比分析其他多个文件
+def compare_with_base_file(base_text, base_filename, other_texts, other_filenames, compliance_standard, 
+                          api_key, api_url, temperature, max_tokens):
+    """以一个基准文件为参考，对比分析其他多个文件的条款合规性"""
+    if not base_text or len(other_texts) == 0:
+        st.warning("请确保已选择基准文件并至少选择一个对比文件")
         return None
     
-    # 构建文件内容摘要
-    file_summaries = []
-    for i, (text, filename) in enumerate(zip(texts, filenames)):
-        file_summaries.append(f"文件 {i+1}: {filename}\n主要条款摘要: {text[:500]}...")
+    # 构建基准文件摘要
+    base_summary = f"基准文件: {base_filename}\n主要条款摘要: {base_text[:800]}..."
+    
+    # 构建其他文件摘要
+    other_summaries = []
+    for i, (text, filename) in enumerate(zip(other_texts, other_filenames)):
+        other_summaries.append(f"对比文件 {i+1}: {filename}\n主要条款摘要: {text[:500]}...")
     
     # 构建提示词
     prompt = f"""
-    请对比分析以下{len(texts)}个文件中与条款相关的内容在合规性方面的异同。
+    请以基准文件为参考，对比分析其他{len(other_texts)}个文件中与条款相关的内容在合规性方面的异同。
     只关注与条款相关的内容，忽略无关条款和信息。
-    重点分析它们在符合和不符合指定合规性标准方面的差异。
+    重点分析它们在符合指定合规性标准方面与基准文件的差异，以及各自的合规风险。
     
     合规性标准:
     {compliance_standard}
     
-    文件内容摘要:
-    {chr(10).join(file_summaries)}
+    基准文件内容摘要:
+    {base_summary}
+    
+    其他文件内容摘要:
+    {chr(10).join(other_summaries)}
     
     请按照以下结构输出对比分析结果:
-    1. 合规性共同点: 所有文件在合规性方面的共同之处
-    2. 合规性差异点: 各文件在合规性方面的不同之处
-    3. 合规风险对比: 各文件面临的合规风险比较
-    4. 总体对比结论: 对各文件的合规性进行综合评价和排序
+    1. 合规性一致性: 各文件与基准文件在合规性方面的共同之处
+    2. 合规性差异点: 各文件与基准文件在合规性方面的不同之处，包括更严格或更宽松的条款
+    3. 合规风险对比: 各文件相对于基准文件的合规风险评估
+    4. 条款匹配度: 各文件与基准文件条款的匹配程度和偏离情况
+    5. 总体评估: 对各文件相对于基准文件的合规性综合评价
     """
     
     return call_qwen_api(prompt, api_key, api_url, temperature, max_tokens)
@@ -151,104 +159,118 @@ def compare_multiple_files(texts, filenames, compliance_standard, api_key, api_u
 def main():
     # 文件上传
     uploaded_files = st.file_uploader(
-        "选择要分析的PDF文件", 
+        "选择要分析的PDF文件（包括基准文件和对比文件）", 
         type="pdf", 
         accept_multiple_files=True
     )
     
-    if uploaded_files:
-        # 显示上传的文件
-        st.subheader("已上传文件")
-        for file in uploaded_files:
+    if uploaded_files and len(uploaded_files) >= 2:
+        # 选择基准文件
+        base_file_index = st.selectbox(
+            "选择基准文件",
+            options=range(len(uploaded_files)),
+            format_func=lambda x: uploaded_files[x].name
+        )
+        base_file = uploaded_files[base_file_index]
+        
+        # 显示上传的文件和基准文件信息
+        st.subheader("文件信息")
+        st.info(f"📌 基准文件: {base_file.name}")
+        
+        other_files = [f for i, f in enumerate(uploaded_files) if i != base_file_index]
+        st.write("对比文件:")
+        for file in other_files:
             st.write(f"- {file.name} ({file.size} bytes)")
         
         # 提取文本
         with st.spinner("正在提取PDF文本..."):
-            texts = []
-            filenames = []
-            for file in uploaded_files:
-                # 保存文件名
-                filenames.append(file.name)
+            # 提取基准文件文本
+            base_file_bytes = BytesIO(base_file.getvalue())
+            base_text = extract_text_from_pdf(base_file_bytes)
+            
+            if base_text:
+                with st.expander(f"查看基准文件 {base_file.name} 的文本预览"):
+                    st.text_area("", base_text[:1000] + "...", height=200, disabled=True)
+            else:
+                st.warning(f"无法从基准文件 {base_file.name} 中提取文本")
+                return
+            
+            # 提取其他文件文本
+            other_texts = []
+            other_filenames = []
+            for file in other_files:
+                other_filenames.append(file.name)
                 
-                # 提取文本
                 file_bytes = BytesIO(file.getvalue())
                 text = extract_text_from_pdf(file_bytes)
                 
                 if text:
-                    texts.append(text)
-                    # 显示提取的文本预览
-                    with st.expander(f"查看 {file.name} 的文本预览"):
+                    other_texts.append(text)
+                    with st.expander(f"查看对比文件 {file.name} 的文本预览"):
                         st.text_area("", text[:1000] + "...", height=200, disabled=True)
                 else:
-                    st.warning(f"无法从 {file.name} 中提取文本")
+                    st.warning(f"无法从对比文件 {file.name} 中提取文本")
         
         # 分析按钮
-        if st.button("开始分析合规性", disabled=not texts):
-            with st.spinner("正在分析合规性，请稍候..."):
-                # 单文件分析
-                if len(texts) == 1:
-                    st.subheader(f"📊 {filenames[0]} 的合规性分析结果")
-                    result = analyze_single_file_compliance(
-                        texts[0], 
-                        compliance_standard,
-                        qwen_api_key,
-                        qwen_api_url,
-                        temperature,
-                        max_tokens
-                    )
-                    
-                    if result:
-                        st.write(result)
-                        
-                        # 提供下载结果选项
-                        st.download_button(
-                            label="下载分析结果",
-                            data=result,
-                            file_name=f"{filenames[0]}_合规性分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                            mime="text/plain"
-                        )
+        if st.button("开始合规性对比分析", disabled=not (base_text and other_texts)):
+            with st.spinner("正在进行合规性对比分析，请稍候..."):
+                # 先显示基准文件的合规性分析
+                st.subheader(f"📊 基准文件 {base_file.name} 的合规性分析")
+                base_result = analyze_single_file_compliance(
+                    base_text, 
+                    compliance_standard,
+                    qwen_api_key,
+                    qwen_api_url,
+                    temperature,
+                    max_tokens
+                )
+                if base_result:
+                    st.write(base_result)
+                    st.divider()
                 
-                # 多文件对比分析
-                else:
-                    st.subheader("📊 多文件合规性对比分析结果")
-                    
-                    # 先显示各文件的单独分析
-                    with st.expander("查看各文件单独分析结果", expanded=False):
-                        for text, filename in zip(texts, filenames):
-                            st.subheader(f"{filename} 的分析")
-                            result = analyze_single_file_compliance(
-                                text, 
-                                compliance_standard,
-                                qwen_api_key,
-                                qwen_api_url,
-                                temperature,
-                                max_tokens
-                            )
-                            if result:
-                                st.write(result)
-                            st.divider()
-                    
-                    # 再显示对比分析
-                    comparison_result = compare_multiple_files(
-                        texts, 
-                        filenames,
-                        compliance_standard,
-                        qwen_api_key,
-                        qwen_api_url,
-                        temperature,
-                        max_tokens
-                    )
-                    
-                    if comparison_result:
-                        st.write(comparison_result)
-                        
-                        # 提供下载结果选项
-                        st.download_button(
-                            label="下载对比分析结果",
-                            data=comparison_result,
-                            file_name=f"多文件合规性对比分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                            mime="text/plain"
+                # 显示各对比文件的单独分析
+                with st.expander("查看各对比文件的单独合规性分析", expanded=False):
+                    for text, filename in zip(other_texts, other_filenames):
+                        st.subheader(f"{filename} 的合规性分析")
+                        result = analyze_single_file_compliance(
+                            text, 
+                            compliance_standard,
+                            qwen_api_key,
+                            qwen_api_url,
+                            temperature,
+                            max_tokens
                         )
+                        if result:
+                            st.write(result)
+                        st.divider()
+                
+                # 显示与基准文件的对比分析
+                st.subheader(f"📊 与基准文件 {base_file.name} 的合规性对比分析")
+                comparison_result = compare_with_base_file(
+                    base_text,
+                    base_file.name,
+                    other_texts,
+                    other_filenames,
+                    compliance_standard,
+                    qwen_api_key,
+                    qwen_api_url,
+                    temperature,
+                    max_tokens
+                )
+                
+                if comparison_result:
+                    st.write(comparison_result)
+                    
+                    # 提供下载结果选项
+                    st.download_button(
+                        label="下载对比分析结果",
+                        data=comparison_result,
+                        file_name=f"与{base_file.name}_的合规性对比分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                        mime="text/plain"
+                    )
+    
+    elif uploaded_files and len(uploaded_files) == 1:
+        st.warning("请至少上传两个文件（一个作为基准文件，一个作为对比文件）")
     
     # 页面底部信息
     st.divider()
@@ -256,3 +278,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
