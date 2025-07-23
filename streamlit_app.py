@@ -1,295 +1,352 @@
 import streamlit as st
-import pdfplumber
-import requests
-import json
+from PyPDF2 import PdfReader
+from difflib import SequenceMatcher
+import base64
 import re
-from io import BytesIO
-from datetime import datetime
+import requests
+import jieba  # 用于中文分词，提高匹配精度
 
-# 设置页面配置
+# 设置页面标题和图标
 st.set_page_config(
-    page_title="PDF条款对比分析工具",
+    page_title="Qwen 中文PDF条款合规性分析工具",
     page_icon="📄",
     layout="wide"
 )
 
-# 页面标题
-st.title("📄 PDF条款对比分析工具")
-st.write("上传中文PDF文件，指定基准文件，自动匹配相似条款并分析相似度与合规性")
+# 自定义CSS样式
+st.markdown("""
+<style>
+    .stApp { max-width: 1200px; margin: 0 auto; }
+    .stFileUploader { width: 100%; }
+    .highlight-conflict { background-color: #ffeeba; padding: 2px 4px; border-radius: 3px; }
+    .clause-box { border-left: 4px solid #007bff; padding: 10px; margin: 10px 0; background-color: #f8f9fa; }
+    .compliance-ok { border-left: 4px solid #28a745; }
+    .compliance-warning { border-left: 4px solid #ffc107; }
+    .compliance-conflict { border-left: 4px solid #dc3545; }
+    .model-response { background-color: #f0f2f6; padding: 15px; border-radius: 5px; margin: 10px 0; }
+</style>
+""", unsafe_allow_html=True)
 
-# 侧边栏 - 模型配置
-with st.sidebar:
-    st.header("模型配置")
-    qwen_api_key = st.text_input("Qwen API 密钥", type="password")
-    qwen_api_url = st.text_input("Qwen API 地址", value="https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")
-    temperature = st.slider("生成温度", 0.0, 1.0, 0.2)
-    max_tokens = st.number_input("最大 tokens", 500, 3000, 2000)
-    
-    st.divider()
-    
-    st.header("匹配设置")
-    similarity_threshold = st.slider("相似度阈值（仅分析高于此阈值的条款）", 
-                                    0.0, 1.0, 0.5, 0.05)
-    
-    st.divider()
-    st.info("提示：请确保已正确配置Qwen API密钥和地址以使用完整功能")
+# 配置Qwen API参数 - 使用指定的API链接
+QWEN_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 
-# 工具函数 - 提取PDF文本
-@st.cache_data
-def extract_text_from_pdf(pdf_file):
-    """从PDF文件中提取文本内容"""
-    text = ""
-    try:
-        with pdfplumber.open(pdf_file) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n\n"
+def call_qwen_api(prompt, api_key):
+    """调用Qwen大模型API，使用指定的API链接"""
+    if not api_key:
+        st.error("Qwen API密钥未设置，请在左侧栏输入密钥")
+        return None
         
-        # 清理文本
-        text = re.sub(r'\s+', ' ', text).strip()
+    try:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        # 构建符合API要求的请求数据
+        data = {
+            "model": "qwen-plus",  # 可根据需要更换为其他Qwen模型如qwen-max
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 1500
+        }
+        
+        # 使用指定的API链接发送POST请求
+        response = requests.post(
+            QWEN_API_URL,
+            headers=headers,
+            json=data,
+            timeout=60
+        )
+        
+        # 检查HTTP响应状态
+        if response.status_code != 200:
+            st.error(f"API请求失败，状态码: {response.status_code}，响应: {response.text}")
+            return None
+            
+        # 解析JSON响应
+        response_json = response.json()
+        
+        # 检查响应结构
+        if "choices" not in response_json or len(response_json["choices"]) == 0:
+            st.error("API返回格式不符合预期")
+            return None
+            
+        return response_json["choices"][0]["message"]["content"]
+        
+    except requests.exceptions.Timeout:
+        st.error("API请求超时，请重试")
+        return None
+    except Exception as e:
+        st.error(f"调用Qwen API失败: {str(e)}")
+        return None
+
+def extract_text_from_pdf(file):
+    """从PDF提取文本，优化中文处理"""
+    try:
+        pdf_reader = PdfReader(file)
+        text = ""
+        for page in pdf_reader.pages:
+            page_text = page.extract_text() or ""
+            # 处理中文空格和换行问题
+            page_text = page_text.replace("  ", "").replace("\n", "").replace("\r", "")
+            text += page_text
         return text
     except Exception as e:
-        st.error(f"提取PDF文本时出错: {str(e)}")
-        return None
+        st.error(f"提取文本失败: {str(e)}")
+        return ""
 
-# 工具函数 - 调用Qwen API
-def call_qwen_api(prompt, api_key, api_url, temperature=0.3, max_tokens=1000):
-    """调用Qwen大模型API"""
-    if not api_key:
-        st.error("请先在侧边栏输入Qwen API密钥")
-        return None
+def split_into_clauses(text):
+    """将文本分割为条款，增强中文条款识别"""
+    # 增强中文条款模式识别
+    patterns = [
+        # 中文条款常见格式
+        r'(第[一二三四五六七八九十百]+条\s+.*?)(?=第[一二三四五六七八九十百]+条\s+|$)',  # 第一条、第二条格式
+        r'([一二三四五六七八九十]+、\s+.*?)(?=[一二三四五六七八九十]+、\s+|$)',  # 一、二、三、格式
+        r'(\d+\.\s+.*?)(?=\d+\.\s+|$)',  # 1. 2. 3. 格式
+        r'(\([一二三四五六七八九十]+\)\s+.*?)(?=\([一二三四五六七八九十]+\)\s+|$)',  # (一) (二) 格式
+        r'(\([1-9]+\)\s+.*?)(?=\([1-9]+\)\s+|$)',  # (1) (2) 格式
+        r'(【[^\】]+】\s+.*?)(?=【[^\】]+】\s+|$)'  # 【标题】格式
+    ]
     
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}"
-    }
+    for pattern in patterns:
+        clauses = re.findall(pattern, text, re.DOTALL)
+        if len(clauses) > 3:  # 确保找到足够多的条款
+            return [clause.strip() for clause in clauses if clause.strip()]
     
-    data = {
-        "model": "qwen-plus",  # 可根据需要更换为其他Qwen模型
-        "messages": [
-            {"role": "system", "content": "你是一位专业的法律条款分析师，擅长识别和对比中文法律文件中的条款，能够准确评估条款之间的相似度和合规性。"},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens
-    }
-    
-    try:
-        response = requests.post(api_url, headers=headers, data=json.dumps(data))
-        response.raise_for_status()
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
-    except Exception as e:
-        st.error(f"调用Qwen API时出错: {str(e)}")
-        st.text(f"响应内容: {response.text if 'response' in locals() else '无响应'}")
-        return None
+    # 按中文标点分割段落
+    paragraphs = re.split(r'[。；！？]\s*', text)
+    paragraphs = [p.strip() for p in paragraphs if p.strip() and len(p) > 10]  # 过滤过短内容
+    return paragraphs
 
-# 工具函数 - 从文本中提取独立条款
-def extract_clauses(text, api_key, api_url, temperature, max_tokens):
-    """从文本中提取独立的条款"""
-    if not text:
-        return None
+def chinese_text_similarity(text1, text2):
+    """计算中文文本相似度，使用分词后匹配"""
+    # 使用jieba进行中文分词
+    words1 = list(jieba.cut(text1))
+    words2 = list(jieba.cut(text2))
     
+    # 计算分词后的相似度
+    return SequenceMatcher(None, words1, words2).ratio()
+
+def match_clauses(clauses1, clauses2):
+    """匹配两个文档中的相似条款，优化中文匹配"""
+    matched_pairs = []
+    used_indices = set()
+    
+    for i, clause1 in enumerate(clauses1):
+        best_match = None
+        best_ratio = 0.25  # 降低中文匹配阈值
+        best_j = -1
+        
+        for j, clause2 in enumerate(clauses2):
+            if j not in used_indices:
+                # 使用中文优化的相似度计算
+                ratio = chinese_text_similarity(clause1, clause2)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_match = clause2
+                    best_j = j
+        
+        if best_match:
+            matched_pairs.append((clause1, best_match, best_ratio))
+            used_indices.add(best_j)
+    
+    unmatched1 = [clause for i, clause in enumerate(clauses1) 
+                 if i not in [idx for idx, _ in enumerate(matched_pairs)]]
+    unmatched2 = [clause for j, clause in enumerate(clauses2) if j not in used_indices]
+    
+    return matched_pairs, unmatched1, unmatched2
+
+def create_download_link(content, filename, text):
+    """生成下载链接"""
+    b64 = base64.b64encode(content.encode()).decode()
+    return f'<a href="data:file/txt;base64,{b64}" download="{filename}">{text}</a>'
+
+def analyze_compliance_with_qwen(clause1, clause2, filename1, filename2, api_key):
+    """使用Qwen大模型分析条款合规性，优化中文提示词"""
+    # 优化中文提示词，更符合中文条款分析场景
     prompt = f"""
-    请从以下文本中提取所有独立的条款，每个条款作为一个单独的条目。
-    只提取具有明确规定性、约束性或说明性的内容作为条款。
-    忽略无关的描述性文字、标题和格式内容。
-    每个条款用数字编号，确保条款的完整性和独立性。
+    请仔细分析以下两个中文条款的合规性，判断它们是否存在冲突：
     
-    文本内容:
-    {text[:3000]}
+    {filename1} 条款：{clause1}
     
-    输出格式:
-    1. [条款内容1]
-    2. [条款内容2]
-    ...
+    {filename2} 条款：{clause2}
+    
+    请按照以下结构用中文进行详细分析：
+    1. 相似度评估：评估两个条款的相似程度（高/中/低）
+    2. 差异点分析：详细指出两个条款在表述、范围、要求等方面的主要差异
+    3. 合规性判断：判断是否存在冲突（无冲突/轻微冲突/严重冲突）
+    4. 冲突原因：如果存在冲突，请具体说明冲突的原因和可能带来的影响
+    5. 建议：针对发现的问题，给出专业的处理建议
+    
+    分析时请特别注意中文法律/合同条款中常用表述的细微差别，
+    如"应当"与"必须"、"不得"与"禁止"、"可以"与"有权"等词语的区别。
     """
     
-    result = call_qwen_api(prompt, api_key, api_url, temperature, max_tokens)
-    if result:
-        # 简单解析提取的条款
-        clauses = []
-        for line in result.split('\n'):
-            line = line.strip()
-            if line.startswith(('1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.')):
-                clause = re.sub(r'^\d+\.\s*', '', line)
-                if clause:
-                    clauses.append(clause)
-        return clauses
-    return None
+    return call_qwen_api(prompt, api_key)
 
-# 工具函数 - 对比条款相似度和合规性
-def compare_clauses(base_clauses, base_filename, other_clauses_list, other_filenames,
-                   similarity_threshold, api_key, api_url, temperature, max_tokens):
-    """对比条款相似度和合规性"""
-    if not base_clauses or not other_clauses_list:
-        st.warning("请确保已提取基准文件和对比文件的条款")
-        return None
-    
-    # 构建条款对比提示
+def analyze_standalone_clause_with_qwen(clause, doc_name, api_key):
+    """使用Qwen大模型分析独立条款（未匹配的条款）"""
     prompt = f"""
-    作为专业法律条款分析师，请对比分析基准文件与其他文件中的条款。
-    只关注相似的条款，忽略未匹配的条款。
-    对于每对相似条款，评估它们的相似度（0-100%）和合规性。
-    仅分析相似度高于{similarity_threshold*100}%的条款对。
+    请分析以下中文条款的内容：
     
-    基准文件: {base_filename}
-    基准文件条款:
-    {chr(10).join([f"{i+1}. {clause}" for i, clause in enumerate(base_clauses[:10])])}  # 限制条款数量
+    {doc_name} 中的条款：{clause}
     
-    {chr(10).join([
-        f"对比文件 {i+1}: {filename}\n条款: {chr(10).join([f"{j+1}. {clause}" for j, clause in enumerate(clauses[:10])])}"
-        for i, (filename, clauses) in enumerate(zip(other_filenames, other_clauses_list))
-    ])}
-    
-    请按照以下结构输出分析结果:
-    1. 条款匹配概述: 各文件与基准文件的条款匹配数量和总体相似度
-    2. 详细条款对比: 对每对相似条款（按相似度从高到低）:
-       - 基准条款内容
-       - 对比条款内容
-       - 相似度评分（0-100%）
-       - 合规性分析：说明对比条款是否符合基准条款的要求，存在哪些差异
-       - 差异影响：这些差异可能带来的影响和风险
-    3. 合规性总结: 各文件相对于基准文件的总体合规性评价
+    请用中文评估该条款的主要内容、核心要求、潜在影响和可能存在的问题，
+    并给出简要分析和建议。分析时请注意中文表述的准确性和专业性。
     """
     
-    return call_qwen_api(prompt, api_key, api_url, temperature, max_tokens)
+    return call_qwen_api(prompt, api_key)
 
-# 主界面
-def main():
-    # 文件上传
-    uploaded_files = st.file_uploader(
-        "选择要分析的PDF文件（包括基准文件和对比文件）", 
-        type="pdf", 
+def analyze_single_comparison(base_clauses, compare_text, base_name, compare_name, api_key):
+    """分析单个对比文件与基准文件的合规性"""
+    # 分割对比文件条款
+    with st.spinner(f"正在分析 {compare_name} 的条款结构..."):
+        compare_clauses = split_into_clauses(compare_text)
+        st.success(f"{compare_name} 条款分析完成，识别出 {len(compare_clauses)} 条条款")
+    
+    # 匹配条款
+    with st.spinner(f"正在匹配 {base_name} 与 {compare_name} 的相似条款..."):
+        matched_pairs, unmatched_base, unmatched_compare = match_clauses(base_clauses, compare_clauses)
+    
+    # 显示总体统计
+    st.divider()
+    col1, col2, col3 = st.columns(3)
+    col1.metric(f"{base_name} 条款数", len(base_clauses))
+    col2.metric(f"{compare_name} 条款数", len(compare_clauses))
+    col3.metric("匹配条款数", len(matched_pairs))
+    
+    # 显示条款对比和合规性分析
+    st.divider()
+    st.subheader(f"📊 {compare_name} 与 {base_name} 条款合规性详细分析（Qwen大模型）")
+    
+    # 分析每个匹配对的合规性
+    for i, (clause1, clause2, ratio) in enumerate(matched_pairs):
+        st.markdown(f"### 匹配条款对 {i+1}（相似度: {ratio:.2%}）")
+        
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown(f'<div class="clause-box"><strong>{base_name} 条款:</strong><br>{clause1}</div>', unsafe_allow_html=True)
+        with col_b:
+            st.markdown(f'<div class="clause-box"><strong>{compare_name} 条款:</strong><br>{clause2}</div>', unsafe_allow_html=True)
+        
+        with st.spinner("正在调用Qwen大模型进行中文合规性分析..."):
+            analysis = analyze_compliance_with_qwen(clause1, clause2, base_name, compare_name, api_key)
+        
+        if analysis:
+            st.markdown('<div class="model-response"><strong>Qwen大模型分析结果:</strong><br>' + analysis + '</div>', unsafe_allow_html=True)
+        
+        st.divider()
+    
+    # 未匹配的条款分析
+    st.subheader("未匹配条款分析")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown(f"#### {base_name} 中独有的条款 ({len(unmatched_base)})")
+        for i, clause in enumerate(unmatched_base):
+            st.markdown(f'<div class="clause-box"><strong>条款 {i+1}:</strong><br>{clause}</div>', unsafe_allow_html=True)
+            
+            with st.spinner("Qwen大模型正在分析此条款..."):
+                analysis = analyze_standalone_clause_with_qwen(clause, base_name, api_key)
+            
+            if analysis:
+                st.markdown('<div class="model-response"><strong>Qwen分析:</strong><br>' + analysis + '</div>', unsafe_allow_html=True)
+            st.divider()
+    
+    with col2:
+        st.markdown(f"#### {compare_name} 中独有的条款 ({len(unmatched_compare)})")
+        for i, clause in enumerate(unmatched_compare):
+            st.markdown(f'<div class="clause-box"><strong>条款 {i+1}:</strong><br>{clause}</div>', unsafe_allow_html=True)
+            
+            with st.spinner("Qwen大模型正在分析此条款..."):
+                analysis = analyze_standalone_clause_with_qwen(clause, compare_name, api_key)
+            
+            if analysis:
+                st.markdown('<div class="model-response"><strong>Qwen分析:</strong><br>' + analysis + '</div>', unsafe_allow_html=True)
+            st.divider()
+
+# 应用主界面
+st.title("📄 Qwen 中文PDF条款合规性分析工具")
+st.markdown("专为中文文档优化的智能条款合规性分析系统 - 支持一对多分析")
+
+# Qwen API设置
+with st.sidebar:
+    st.subheader("Qwen API 设置")
+    qwen_api_key = st.text_input("请输入Qwen API密钥", type="password")
+    st.markdown(f"""
+    提示：API密钥可以从阿里云DashScope控制台获取。
+    当前使用的API端点：`{QWEN_API_URL}`
+    """)
+
+with st.form("upload_form"):
+    st.subheader("基准文件")
+    base_file = st.file_uploader("选择基准PDF文件", type=["pdf"], key="base_file")
+    
+    st.subheader("对比文件（可上传多个）")
+    compare_files = st.file_uploader(
+        "选择需要对比的PDF文件", 
+        type=["pdf"], 
+        key="compare_files",
         accept_multiple_files=True
     )
     
-    if uploaded_files and len(uploaded_files) >= 2:
-        # 选择基准文件
-        base_file_index = st.selectbox(
-            "选择基准文件",
-            options=range(len(uploaded_files)),
-            format_func=lambda x: uploaded_files[x].name
-        )
-        base_file = uploaded_files[base_file_index]
+    submitted = st.form_submit_button("开始合规性分析")
+
+if submitted and base_file and compare_files:
+    if not qwen_api_key:
+        st.warning("未检测到Qwen API密钥，部分功能可能受限")
+    
+    with st.spinner("正在解析基准PDF内容，请稍候..."):
+        base_text = extract_text_from_pdf(base_file)
         
-        # 显示上传的文件和基准文件信息
-        st.subheader("文件信息")
-        st.info(f"📌 基准文件: {base_file.name}")
-        
-        other_files = [f for i, f in enumerate(uploaded_files) if i != base_file_index]
-        st.write("对比文件:")
-        for file in other_files:
-            st.write(f"- {file.name} ({file.size} bytes)")
-        
-        # 提取文本和条款
-        with st.spinner("正在提取PDF文本和条款..."):
-            # 提取基准文件文本和条款
-            base_file_bytes = BytesIO(base_file.getvalue())
-            base_text = extract_text_from_pdf(base_file_bytes)
+        if not base_text:
+            st.error("无法提取基准文件的文本内容，请确认PDF包含可提取的中文文本")
+        else:
+            # 预处理基准文件条款（只需处理一次）
+            base_clauses = split_into_clauses(base_text)
+            st.success(f"基准文件 {base_file.name} 解析完成，识别出 {len(base_clauses)} 条条款")
             
-            base_clauses = None
-            if base_text:
-                with st.expander(f"查看基准文件 {base_file.name} 的文本预览"):
-                    st.text_area("", base_text[:1000] + "...", height=200, disabled=True)
+            # 对每个对比文件进行分析
+            for i, compare_file in enumerate(compare_files, 1):
+                st.markdown(f"## 🔍 分析 {i}/{len(compare_files)}: {compare_file.name} 与 {base_file.name} 的对比")
                 
-                # 提取条款
-                with st.spinner(f"正在从基准文件 {base_file.name} 中提取条款..."):
-                    base_clauses = extract_clauses(
-                        base_text, 
-                        qwen_api_key,
-                        qwen_api_url,
-                        temperature,
-                        max_tokens
-                    )
+                compare_text = extract_text_from_pdf(compare_file)
+                if not compare_text:
+                    st.error(f"无法提取 {compare_file.name} 的文本内容，跳过该文件")
+                    continue
                 
-                if base_clauses:
-                    st.success(f"从基准文件 {base_file.name} 中提取到 {len(base_clauses)} 条条款")
-                    with st.expander("查看提取的基准条款"):
-                        for i, clause in enumerate(base_clauses[:10]):  # 只显示前10条
-                            st.write(f"{i+1}. {clause}")
-                        if len(base_clauses) > 10:
-                            st.write(f"... 共 {len(base_clauses)} 条条款")
-                else:
-                    st.warning(f"无法从基准文件 {base_file.name} 中提取条款")
-                    return
-            else:
-                st.warning(f"无法从基准文件 {base_file.name} 中提取文本")
-                return
-            
-            # 提取其他文件文本和条款
-            other_clauses_list = []
-            other_filenames = []
-            
-            for file in other_files:
-                other_filenames.append(file.name)
-                
-                file_bytes = BytesIO(file.getvalue())
-                text = extract_text_from_pdf(file_bytes)
-                
-                if text:
-                    with st.expander(f"查看对比文件 {file.name} 的文本预览"):
-                        st.text_area("", text[:1000] + "...", height=200, disabled=True)
-                    
-                    # 提取条款
-                    with st.spinner(f"正在从对比文件 {file.name} 中提取条款..."):
-                        clauses = extract_clauses(
-                            text, 
-                            qwen_api_key,
-                            qwen_api_url,
-                            temperature,
-                            max_tokens
-                        )
-                    
-                    if clauses:
-                        other_clauses_list.append(clauses)
-                        st.success(f"从对比文件 {file.name} 中提取到 {len(clauses)} 条条款")
-                        with st.expander(f"查看提取的 {file.name} 条款"):
-                            for i, clause in enumerate(clauses[:10]):  # 只显示前10条
-                                st.write(f"{i+1}. {clause}")
-                            if len(clauses) > 10:
-                                st.write(f"... 共 {len(clauses)} 条条款")
-                    else:
-                        st.warning(f"无法从对比文件 {file.name} 中提取条款")
-                else:
-                    st.warning(f"无法从对比文件 {file.name} 中提取文本")
-        
-        # 分析按钮
-        if st.button("开始条款对比分析", disabled=not (base_clauses and other_clauses_list)):
-            with st.spinner("正在进行条款相似度和合规性分析，请稍候..."):
-                # 进行条款对比分析
-                st.subheader(f"📊 条款相似度与合规性对比分析结果")
-                comparison_result = compare_clauses(
-                    base_clauses,
-                    base_file.name,
-                    other_clauses_list,
-                    other_filenames,
-                    similarity_threshold,
-                    qwen_api_key,
-                    qwen_api_url,
-                    temperature,
-                    max_tokens
+                # 分析当前对比文件与基准文件
+                analyze_single_comparison(
+                    base_clauses, 
+                    compare_text, 
+                    base_file.name, 
+                    compare_file.name, 
+                    qwen_api_key
                 )
                 
-                if comparison_result:
-                    st.write(comparison_result)
-                    
-                    # 提供下载结果选项
-                    st.download_button(
-                        label="下载条款对比分析结果",
-                        data=comparison_result,
-                        file_name=f"{base_file.name}_条款对比分析_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                        mime="text/plain"
-                    )
-    
-    elif uploaded_files and len(uploaded_files) == 1:
-        st.warning("请至少上传两个文件（一个作为基准文件，一个作为对比文件）")
-    
-    # 页面底部信息
-    st.divider()
-    st.caption("注意：本工具仅提供初步分析参考，不构成法律意见。重要合规性问题请咨询专业法律人士。")
+                # 在文件分析之间添加分隔
+                st.markdown("---")
+                st.markdown("### 下一个文件分析")
+elif submitted:
+    if not base_file:
+        st.error("请上传基准PDF文件")
+    if not compare_files:
+        st.error("请至少上传一个对比PDF文件")
+else:
+    st.info('请上传一个基准PDF文件和至少一个对比PDF文件，然后点击"开始合规性分析"按钮')
 
-if __name__ == "__main__":
-    main()
-    
+# 添加页脚
+st.divider()
+st.markdown("""
+<style>
+.footer {
+    font-size: 0.8rem;
+    color: #666;
+    text-align: center;
+    margin-top: 2rem;
+}
+</style>
+<div class="footer">
+    中文PDF条款合规性分析工具 | 基于Qwen大模型 | 优化中文文档处理 | 支持一对多分析
+</div>
+""", unsafe_allow_html=True)
