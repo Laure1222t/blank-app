@@ -48,7 +48,7 @@ def call_qwen_api(prompt, api_key):
             "model": "qwen-plus",  # 可根据需要更换为其他Qwen模型如qwen-max
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1500
+            "max_tokens": 3000
         }
         
         # 使用指定的API链接发送POST请求
