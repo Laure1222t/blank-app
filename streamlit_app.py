@@ -364,3 +364,225 @@ def show_multi_target_analysis(
     )
 
     if not selected_targets:
+        st.info("请至少选择一个目标文件")
+        return
+
+    # 批量分析
+    for target_name in selected_targets:
+        # 找到对应的文件对象
+        target_file = next(f for f in target_files if f.name == target_name)
+        target_text = extract_text_from_pdf(target_file)
+        
+        if not target_text:
+            st.error(f"无法提取 {target_name} 的文本内容，跳过该文件")
+            continue
+
+        # 显示单个目标分析结果
+        st.divider()
+        st.header(f"📌 {target_name} 与 {bench_name} 对比分析")
+        
+        # 执行分析
+        with st.spinner(f"正在分析 {target_name}..."):
+            result = analyze_single_target(
+                bench_text, target_text, bench_name, target_name, api_key, model
+            )
+        
+        # 统计信息卡片
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.info(f"**{bench_name} 条款数**\n{result['bench_count']}")
+        with col2:
+            st.info(f"**{target_name} 条款数**\n{result['target_count']}")
+        with col3:
+            st.info(f"**匹配条款数**\n{result['matched_count']}")
+
+        # 生成并提供报告下载
+        report = generate_analysis_report(result)
+        st.markdown(
+            create_download_link(report, f"{target_name}_合规性分析报告.txt", "📥 下载完整分析报告"),
+            unsafe_allow_html=True
+        )
+
+        # 详细分析（带折叠面板）
+        with st.expander("条款匹配及合规性分析（点击展开）", expanded=True):
+            for i in range(result["matched_count"]):
+                st.markdown(f"### 匹配对 {i+1}（相似度: {result['matched_pairs'][i][2]:.2%}）")
+                
+                # 条款对比展示
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.markdown(f'<div class="clause-box compliance-ok"><strong>{bench_name} 条款:</strong><br>{result["matched_pairs"][i][0]}</div>', unsafe_allow_html=True)
+                with col_b:
+                    st.markdown(f'<div class="clause-box"><strong>{target_name} 条款:</strong><br>{result["matched_pairs"][i][1]}</div>', unsafe_allow_html=True)
+                
+                # 合规性分析结果
+                if result["compliance_analyses"][i]:
+                    # 提取合规性结论用于快速标识
+                    analysis_text = result["compliance_analyses"][i]
+                    if "严重冲突" in analysis_text:
+                        badge_class = "compliance-conflict"
+                        badge_text = "严重冲突"
+                    elif "轻微冲突" in analysis_text:
+                        badge_class = "compliance-warning"
+                        badge_text = "轻微冲突"
+                    else:
+                        badge_class = "compliance-ok"
+                        badge_text = "无冲突"
+                    
+                    st.markdown(f'<span class="status-badge {badge_class}">{badge_text}</span>', unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="model-response"><strong>合规性分析:</strong><br>{analysis_text}</div>',
+                        unsafe_allow_html=True
+                    )
+                st.divider()
+
+        # 未匹配条款分析（带展开/折叠）
+        with st.expander(f"未匹配条款分析（点击展开）", expanded=False):
+            col_un1, col_un2 = st.columns(2)
+            
+            with col_un1:
+                st.markdown(f"#### {bench_name} 独有的条款（{len(result['unmatched_bench'])}）")
+                for i, clause in enumerate(result["unmatched_bench"][:5]):
+                    with st.expander(f"条款 {i+1}（点击查看分析）", expanded=False):
+                        st.markdown(f'<div class="clause-box">{clause}</div>', unsafe_allow_html=True)
+                        # 对未匹配的基准条款进行单独分析
+                        analysis = analyze_standalone_clause_with_qwen(clause, bench_name, api_key, model)
+                        if analysis:
+                            st.markdown(f'<div class="model-response"><strong>条款分析:</strong><br>{analysis}</div>', unsafe_allow_html=True)
+                
+                if len(result["unmatched_bench"]) > 5:
+                    st.info(f"共 {len(result['unmatched_bench'])} 条，仅显示前5条")
+
+            with col_un2:
+                st.markdown(f"#### {target_name} 独有的条款（{len(result['unmatched_target'])}）")
+                for i, clause in enumerate(result["unmatched_target"][:5]):
+                    with st.expander(f"条款 {i+1}（点击查看分析）", expanded=False):
+                        st.markdown(f'<div class="clause-box">{clause}</div>', unsafe_allow_html=True)
+                        # 对未匹配的目标条款进行单独分析
+                        analysis = analyze_standalone_clause_with_qwen(clause, target_name, api_key, model)
+                        if analysis:
+                            st.markdown(f'<div class="model-response"><strong>条款分析:</strong><br>{analysis}</div>', unsafe_allow_html=True)
+                
+                if len(result["unmatched_target"]) > 5:
+                    st.info(f"共 {len(result['unmatched_target'])} 条，仅显示前5条")
+
+
+# 主界面优化
+def main():
+    # 初始化会话状态（保存中间结果）
+    if 'analysis_results' not in st.session_state:
+        st.session_state.analysis_results = {}
+
+    st.title("📄 Qwen 中文PDF条款合规性分析工具（1对多）")
+    st.markdown("支持1个基准文件与多个目标文件的条款合规性比对，自动识别法律条款并分析差异")
+
+    # 侧边栏配置增强
+    with st.sidebar:
+        st.subheader("⚙️ 分析配置")
+        
+        # API密钥设置（支持环境变量）
+        qwen_api_key = st.text_input(
+            "请输入Qwen API密钥", 
+            type="password",
+            help="获取密钥: https://dashscope.aliyun.com/"
+        )
+        
+        # 模型选择
+        model_choice = st.selectbox(
+            "选择Qwen模型",
+            options=list(SUPPORTED_MODELS.keys()),
+            format_func=lambda x: SUPPORTED_MODELS[x],
+            index=0  # 默认选择qwen-plus
+        )
+        
+        # 高级选项（折叠）
+        with st.expander("高级选项", expanded=False):
+            similarity_threshold = st.slider(
+                "条款匹配阈值", 
+                min_value=0.1, 
+                max_value=0.5, 
+                value=0.25, 
+                step=0.05,
+                help="值越高，匹配条件越严格"
+            )
+            max_display_clauses = st.slider(
+                "最大显示条款数",
+                min_value=3,
+                max_value=10,
+                value=5,
+                step=1
+            )
+        
+        st.divider()
+        st.info("""
+        使用步骤：
+        1. 输入Qwen API密钥
+        2. 上传1个基准文件（作为合规标准）
+        3. 上传多个目标文件（需要检查的文件）
+        4. 点击"开始分析"按钮
+        """)
+        st.markdown("ℹ️ 提示：大文件分析可能需要较长时间，请耐心等待")
+
+    # 文件上传区优化
+    st.subheader("📂 文件上传区")
+    
+    # 基准文件上传
+    st.markdown('<div class="file-selector"><span class="benchmark-label">基准文件（必填）：</span>选择作为合规性判断依据的文件</div>', unsafe_allow_html=True)
+    bench_file = st.file_uploader(
+        "上传基准文件（仅支持PDF）",
+        type=["pdf"],
+        key="benchmark",
+        accept_multiple_files=False,
+        help="例如：行业标准、公司规定、合同模板等"
+    )
+
+    # 目标文件上传
+    st.markdown('<div class="file-selector"><span class="target-label">目标文件（可多个）：</span>需要进行合规性检查的文件</div>', unsafe_allow_html=True)
+    target_files = st.file_uploader(
+        "上传目标文件（仅支持PDF）",
+        type=["pdf"],
+        key="targets",
+        accept_multiple_files=True,
+        help="例如：待审核的合同、协议、规章制度等"
+    )
+
+    # 分析按钮（增加确认机制）
+    if st.button("开始1对多合规性分析", type="primary"):
+        if not bench_file:
+            st.error("请先上传基准文件")
+            return
+        if not target_files:
+            st.error("请至少上传一个目标文件")
+            return
+        if not qwen_api_key:
+            st.error("请输入Qwen API密钥")
+            return
+
+        # 基准文件处理
+        with st.spinner("正在解析基准文件..."):
+            bench_text = extract_text_from_pdf(bench_file)
+            if not bench_text:
+                st.error("无法提取基准文件文本，请检查文件有效性")
+                return
+
+        # 显示分析结果
+        show_multi_target_analysis(
+            bench_text, 
+            target_files, 
+            bench_file.name, 
+            qwen_api_key,
+            model_choice
+        )
+
+    # 页脚信息
+    st.divider()
+    st.markdown("""
+    <div style="text-align:center; color:#666; margin-top:20px;">
+        中文PDF条款合规性分析工具（1对多版） | 基于Qwen大模型
+        <br>注意：本工具仅提供辅助分析，不构成法律意见
+    </div>
+    """, unsafe_allow_html=True)
+
+
+if __name__ == "__main__":
+    main()
