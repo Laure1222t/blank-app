@@ -75,7 +75,7 @@ def call_qwen_api(prompt: str, api_key: str, model: str = "qwen-plus") -> Option
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 1500
+                "max_tokens": 5000
             }
             
             response = requests.post(
