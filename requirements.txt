@@ -1,5 +1,10 @@
-streamlit==1.35.0
-PyPDF2==3.0.1
-requests==2.31.0
-jieba==0.42.1
-python-dotenv==1.0.0
+streamlit>=1.35.0
+PyPDF2>=3.0.1
+jieba>=0.42.1
+matplotlib>=3.8.0
+transformers>=4.34.0
+torch>=2.0.0
+accelerate>=0.23.0
+sentencepiece>=0.1.99
+protobuf>=3.20.3
+numpy>=1.26.0
