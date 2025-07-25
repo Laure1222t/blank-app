@@ -1,22 +1,47 @@
 #!/bin/bash
 
-# 强制卸载所有相关包
-pip uninstall -y streamlit rich markdown-it-py mdurl pygments commonmark typing-extensions
+# 确保脚本在出错时退出
+set -e
 
-# 更新pip到最新版本（优化依赖解析）
+# 打印欢迎信息
+echo "📦 开始安装 Qwen 中文PDF条款合规性分析工具依赖..."
+
+# 更新系统包（针对Debian/Ubuntu系统）
+if [ -f /etc/debian_version ]; then
+    echo "🔄 更新系统包列表..."
+    sudo apt update -y
+    sudo apt upgrade -y
+fi
+
+# 检查并安装Python3及相关工具
+if ! command -v python3 &> /dev/null; then
+    echo "🐍 安装Python3..."
+    sudo apt install -y python3 python3-pip python3-venv
+fi
+
+# 创建并激活虚拟环境
+echo "🌱 创建虚拟环境..."
+python3 -m venv venv
+source venv/bin/activate
+
+# 升级pip
+echo "🔧 升级pip..."
 pip install --upgrade pip
 
-# 强制安装指定版本，保持 rich 14.0.0 不变
-pip install --no-cache-dir --force-reinstall \
-    streamlit==1.36.0 \  # 升级streamlit以兼容rich 14+
-    PyPDF2==3.0.1 \
-    jieba==0.42.1 \
-    requests==2.31.0 \
-    python-dotenv==1.0.0 \
-    numpy==1.25.2 \
-    rich==13.7.1 \  # 保持rich版本不变
-    markdown-it-py==3.0.0 \  # 适配rich 14.0.0的版本
-    mdurl==0.1.2 \
-    pygments==2.19.2 \  # 适配rich 14.0.0的版本
-    commonmark==0.9.1 \
-    typing-extensions==4.8.0
+# 安装依赖包
+if [ -f "requirements.txt" ]; then
+    echo "📚 安装项目依赖..."
+    pip install -r requirements.txt
+else
+    echo "⚠️ 未找到requirements.txt，使用默认依赖安装..."
+    pip install streamlit==1.35.0 PyPDF2==3.0.1 requests==2.31.0 jieba==0.42.1 python-dotenv==1.0.0
+fi
+
+# 检查是否安装成功
+if command -v streamlit &> /dev/null; then
+    echo "✅ 依赖安装完成！"
+    echo "▶️ 启动命令: source venv/bin/activate && streamlit run streamlit_app.py"
+else
+    echo "❌ 安装失败，请检查错误信息并重试"
+    exit 1
+fi
