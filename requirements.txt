@@ -1,6 +1,14 @@
-# 在 requirements.txt 中明确指定兼容版本
 streamlit==1.35.0
-PyPDF2==3.0.0
-jieba==0.42.1
+PyPDF2==3.0.1
 requests==2.31.0
-rich==13.7.1  # 修正为与 streamlit 兼容的版本
+jieba==0.42.1
+python-dotenv==1.0.0
+# 新增数据处理库
+pandas==2.1.4          # 数据结构与分析
+numpy==1.26.3          # 数值计算
+# 新增可视化库
+matplotlib==3.8.2      # 基础绘图
+seaborn==0.13.2        # 统计可视化
+# 新增文本处理库
+nltk==3.8.1            # 自然语言处理工具包
+textblob==0.17.1       # 文本处理简化库
