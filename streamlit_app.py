@@ -582,10 +582,9 @@ if submitted and base_file and compare_files:
                     # 修复：使用更安全的key命名方式，避免潜在的格式问题
                     expander_key = f"base_chunk_exp_{i}"
                     # 确保expanded参数是布尔值
-                    with st.expander(
-                        label=f"基准文档处理块 {i+1}/{len(chunks)}", 
-                        expanded=False, 
-                        key=expander_key
+                     with st.expander(
+                     label=f"基准文档处理块 {i+1}/{len(chunks)}",
+                        expanded=False
                     ):
                         chunk_clauses = split_into_clauses(chunk, f"{base_file.name} (块 {i+1})")
                         st.success(f"块 {i+1} 识别出 {len(chunk_clauses)} 条条款")
