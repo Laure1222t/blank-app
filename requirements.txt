@@ -1,5 +1,5 @@
-streamlit==1.36.0  # 升级到支持rich14的版本
+streamlit==1.36.0  # 升级到支持 rich 14+ 的版本
 PyPDF2==3.0.0
 jieba==0.42.1
 requests==2.31.0
-rich==14.0.0  # 使用14.x版本
+rich==14.0.0  # 保持版本不变
