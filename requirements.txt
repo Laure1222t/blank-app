@@ -1,9 +1,10 @@
-streamlit==1.21.0  # 此版本开始稳定支持expander的key参数
+streamlit==1.35.0
 PyPDF2==3.0.1
 jieba==0.42.1
 requests==2.31.0
 python-dotenv==1.0.0
 numpy==1.25.2
+# 强制指定与Streamlit 1.35.0兼容的版本
 rich==13.7.1
 markdown-it-py==2.2.0
 mdurl==0.1.2
