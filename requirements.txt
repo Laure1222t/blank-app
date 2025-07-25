@@ -1,6 +1,5 @@
-streamlit>=1.35.0
-PyPDF2>=3.0.0
-jieba>=0.42.1
-requests>=2.31.0
-difflib>=0.0.1
-python-base64>=0.0.0
+streamlit==1.35.0
+PyPDF2==3.0.0
+jieba==0.42.1
+requests==2.31.0
+rich==13.7.0  # 明确指定兼容版本
