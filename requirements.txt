@@ -1,8 +1,8 @@
-streamlit==1.38.0  # 此版本支持rich 14+
+streamlit==1.38.0
 PyPDF2==3.0.1
 jieba==0.42.1
 requests==2.32.3
 python-dotenv==1.0.1
 numpy==1.26.4
-rich==14.0.0  # 直接使用已安装的版本
+rich==14.1.0
     
