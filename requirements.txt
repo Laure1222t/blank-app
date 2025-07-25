@@ -1,8 +1,8 @@
-streamlit==1.37.1
+streamlit==1.35.0
 PyPDF2==3.0.1
 jieba==0.42.1
-requests==2.32.3
-python-dotenv==1.0.1
+requests==2.31.0
+python-dotenv==1.0.0
 numpy==1.26.4
-pytest==7.4.4  # 用于代码测试
+pytest==7.4.4
     
