@@ -5,11 +5,15 @@ import base64
 import re
 import requests
 import jieba
-import jieba
 import hashlib
 import time
+import io
 from functools import lru_cache
 from collections import defaultdict
+# 新增OCR相关库
+from pdf2image import convert_from_path
+import pytesseract
+from PIL import Image
 
 # 设置页面标题和图标
 st.set_page_config(
@@ -73,7 +77,7 @@ def call_qwen_api(prompt, api_key, retry=3):
             "model": "qwen-plus",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1500
+            "max_tokens": 800  # 减少最大 tokens，使回答更简洁
         }
         
         # 带重试机制的API调用
@@ -95,14 +99,14 @@ def call_qwen_api(prompt, api_key, retry=3):
                 else:
                     st.warning(f"API请求失败，状态码: {response.status_code} (尝试 {attempt+1}/{retry})")
                 
-                time.sleep(2 **attempt)  # 指数退避
+                time.sleep(2** attempt)  # 指数退避
                 
             except requests.exceptions.Timeout:
                 st.warning(f"API请求超时 (尝试 {attempt+1}/{retry})")
-                time.sleep(2** attempt)
+                time.sleep(2 **attempt)
             except Exception as e:
                 st.warning(f"API调用异常: {str(e)} (尝试 {attempt+1}/{retry})")
-                time.sleep(2 **attempt)
+                time.sleep(2** attempt)
                 
         st.error("API调用多次失败，请稍后重试")
         return None
@@ -111,9 +115,82 @@ def call_qwen_api(prompt, api_key, retry=3):
         st.error(f"调用Qwen API失败: {str(e)}")
         return None
 
-def extract_text_from_pdf(file, progress_bar=None):
-    """从PDF提取文本，支持大文件处理和进度显示"""
+# 新增OCR相关函数
+def ocr_image(image):
+    """对单张图片进行OCR识别，提取中文文本"""
     try:
+        # 配置Tesseract识别中文
+        custom_config = r'--oem 3 --psm 6 -l chi_sim'
+        text = pytesseract.image_to_string(image, config=custom_config)
+        return text
+    except Exception as e:
+        st.warning(f"OCR识别出错: {str(e)}")
+        return ""
+
+def extract_text_from_image_pdf(file, progress_bar=None):
+    """从图片PDF中提取文本（先转为图片再进行OCR）"""
+    try:
+        # 将PDF保存到临时文件
+        temp_path = f"temp_{hashlib.md5(file.read()).hexdigest()}.pdf"
+        file.seek(0)  # 重置文件指针
+        with open(temp_path, "wb") as f:
+            f.write(file.read())
+        
+        # 将PDF转换为图片
+        pages = convert_from_path(temp_path, 300)  # 300 DPI提高识别精度
+        total_pages = len(pages)
+        text = ""
+        
+        for i, page in enumerate(pages):
+            # 对每一页进行OCR
+            page_text = ocr_image(page)
+            # 处理识别结果
+            page_text = page_text.replace("  ", "").replace("\n", "").replace("\r", "")
+            text += page_text
+            
+            # 更新进度条
+            if progress_bar is not None:
+                progress = (i + 1) / total_pages
+                progress_bar.progress(progress)
+                progress_bar.text(f"OCR处理: 第 {i+1}/{total_pages} 页")
+        
+        return text
+    except Exception as e:
+        st.error(f"图片PDF处理失败: {str(e)}")
+        return ""
+
+def is_image_based_pdf(file):
+    """判断PDF是否为图片型PDF（无文本层）"""
+    try:
+        # 尝试提取文本
+        pdf_reader = PdfReader(file)
+        file.seek(0)  # 重置文件指针
+        
+        # 检查前几页是否有文本
+        sample_text = ""
+        for i, page in enumerate(pdf_reader.pages):
+            if i >= 3:  # 检查前3页
+                break
+            sample_text += page.extract_text() or ""
+            
+        # 如果提取的文本很少，视为图片型PDF
+        return len(sample_text.strip()) < 50
+    except Exception as e:
+        st.warning(f"PDF类型检测出错: {str(e)}")
+        return False
+
+def extract_text_from_pdf(file, progress_bar=None):
+    """从PDF提取文本，支持普通PDF和图片PDF（通过OCR）"""
+    try:
+        # 先判断PDF类型
+        file.seek(0)  # 重置文件指针
+        if is_image_based_pdf(file):
+            st.info("检测到图片型PDF，将使用OCR进行文字识别（可能需要较长时间）")
+            file.seek(0)  # 重置文件指针
+            return extract_text_from_image_pdf(file, progress_bar)
+        
+        # 普通PDF文本提取
+        file.seek(0)  # 重置文件指针
         pdf_reader = PdfReader(file)
         text = ""
         total_pages = len(pdf_reader.pages)
@@ -137,9 +214,6 @@ def extract_text_from_pdf(file, progress_bar=None):
 
 def split_into_clauses(text, doc_name="文档"):
     """将文本分割为条款，增强中文条款识别和大文档处理"""
-    # 先尝试使用大模型辅助识别条款结构（对于复杂文档）
-    # 但为避免API调用过多，先尝试规则匹配
-    
     # 增强中文条款模式识别，更全面的模式库
     patterns = [
         # 主要条款模式
@@ -280,57 +354,54 @@ def create_download_link(content, filename, text):
     return f'<a href="data:file/txt;base64,{b64}" download="{filename}">{text}</a>'
 
 def analyze_compliance_with_qwen(clause1, clause2, filename1, filename2, api_key):
-    """使用Qwen大模型分析条款合规性，优化中文提示词"""
+    """使用Qwen大模型分析条款合规性，简化差异点分析"""
     prompt = f"""
-    请仔细分析以下两个中文条款的合规性，判断它们是否存在冲突：
+    请简要分析以下两个中文条款的合规性，判断它们是否存在冲突：
     
     {filename1} 条款：{clause1}
     
     {filename2} 条款：{clause2}
     
-    请按照以下结构用中文进行详细分析：
-    1. 相似度评估：评估两个条款的相似程度（高/中/低）
-    2. 差异点分析：详细指出两个条款在表述、范围、要求等方面的主要差异
-    3. 合规性判断：判断是否存在冲突（无冲突/轻微冲突/严重冲突）
-    4. 冲突原因：如果存在冲突，请具体说明冲突的原因和可能带来的影响
-    5. 建议：针对发现的问题，给出专业的处理建议
+    请按照以下结构用中文进行简洁分析（总字数控制在300字以内）：
+    1. 相似度评估：简要说明相似程度（高/中/低）
+    2. 主要差异：列出1-2个最核心的差异点
+    3. 合规性判断：是否存在冲突（无冲突/轻微冲突/严重冲突）
+    4. 简要建议：针对发现的问题，给出简短建议
     
-    分析时请特别注意中文法律/合同条款中常用表述的细微差别，
-    如"应当"与"必须"、"不得"与"禁止"、"可以"与"有权"等词语的区别。
+    分析请简明扼要，避免冗长描述。
     """
     
     return call_qwen_api(prompt, api_key)
 
 def analyze_standalone_clause_with_qwen(clause, doc_name, api_key):
-    """使用Qwen大模型分析独立条款（未匹配的条款）"""
+    """使用Qwen大模型分析独立条款（未匹配的条款），结果更简洁"""
     prompt = f"""
-    请分析以下中文条款的内容：
+    请简要分析以下中文条款的内容（总字数控制在200字以内）：
     
     {doc_name} 中的条款：{clause}
     
-    请用中文评估该条款的主要内容、核心要求、潜在影响和可能存在的问题，
-    并给出简要分析和建议。分析时请注意中文表述的准确性和专业性。
+    请用中文简要说明该条款的核心内容和主要要求，无需展开详细分析。
     """
     
     return call_qwen_api(prompt, api_key)
 
 def analyze_document_structure(text, doc_name, api_key):
-    """分析文档结构，获取文档概述和主要章节"""
+    """分析文档结构，获取文档概述和主要章节，结果更简洁"""
     if not api_key:
         return None
         
     prompt = f"""
-    请分析以下文档的结构并提供概述：
+    请简要分析以下文档的结构并提供概述（总字数控制在200字以内）：
     
     文档名称：{doc_name}
     文档内容：{text[:3000]}  # 只取前3000字符进行分析
     
-    请提供：
-    1. 文档类型和主题概述（100字以内）
-    2. 主要章节或条款分类
-    3. 文档的核心目的和适用范围
+    请简明提供：
+    1. 文档类型和主题概述
+    2. 主要章节或条款分类（最多5项）
+    3. 文档的核心目的
     
-    分析应简洁明了，重点突出文档的结构特点。
+    分析应非常简洁，避免细节描述。
     """
     
     return call_qwen_api(prompt, api_key)
@@ -395,7 +466,7 @@ def analyze_single_comparison(base_clauses, compare_text, base_name, compare_nam
     
     # 显示条款对比和合规性分析
     st.divider()
-    st.subheader(f"📊 {compare_name} 与 {base_name} 条款合规性详细分析（Qwen大模型）")
+    st.subheader(f"📊 {compare_name} 与 {base_name} 条款合规性分析（Qwen大模型）")
     
     # 创建分析结果的标签页导航
     tab_labels = ["全部匹配项"]
@@ -439,14 +510,14 @@ def analyze_single_comparison(base_clauses, compare_text, base_name, compare_nam
                 st.markdown(f'<div class="clause-box"><strong>{compare_name} 条款:</strong><br>{clause2}</div>', unsafe_allow_html=True)
             
             # 添加分析结果折叠框
-            with st.expander("查看Qwen大模型合规性分析", expanded=False):
-                with st.spinner("正在调用Qwen大模型进行中文合规性分析..."):
+            with st.expander("查看Qwen大模型分析", expanded=False):
+                with st.spinner("正在调用Qwen大模型进行分析..."):
                     analysis = analyze_compliance_with_qwen(clause1, clause2, base_name, compare_name, api_key)
                 
                 if analysis:
-                    st.markdown('<div class="model-response"><strong>Qwen大模型分析结果:</strong><br>' + analysis + '</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="model-response"><strong>Qwen分析结果:</strong><br>' + analysis + '</div>', unsafe_allow_html=True)
                 else:
-                    st.warning("未能获取合规性分析结果")
+                    st.warning("未能获取分析结果")
             
             st.divider()
     
@@ -496,7 +567,20 @@ def analyze_single_comparison(base_clauses, compare_text, base_name, compare_nam
 
 # 应用主界面
 st.title("📄 Qwen 中文PDF条款合规性分析工具")
-st.markdown("专为中文文档优化的智能条款合规性分析系统 - 支持大文档和一对多分析")
+st.markdown("专为中文文档优化的智能条款合规性分析系统 - 支持大文档、图片PDF和一对多分析")
+
+# 新增OCR配置说明
+with st.expander("📌 关于图片PDF处理", expanded=False):
+    st.markdown("""
+    本工具支持处理图片转PDF中的文字（通过OCR技术），但需要额外配置：
+    
+    1. 安装Tesseract OCR引擎：
+       - Windows: 下载安装 [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki)
+       - macOS: `brew install tesseract tesseract-lang`
+       - Linux: `sudo apt install tesseract-ocr tesseract-ocr-chi-sim`
+    
+    2. 确保中文语言包已安装（用于识别中文文本）
+    """)
 
 # Qwen API设置
 with st.sidebar:
@@ -507,11 +591,21 @@ with st.sidebar:
     当前使用的API端点：`{QWEN_API_URL}`
     """)
     
+    # OCR设置
+    st.subheader("OCR 设置")
+    tesseract_path = st.text_input(
+        "Tesseract OCR安装路径（可选）", 
+        value=r"C:\Program Files\Tesseract-OCR\tesseract.exe" if st.runtime.platform == "windows" else "/usr/bin/tesseract"
+    )
+    # 配置Tesseract路径
+    pytesseract.pytesseract.tesseract_cmd = tesseract_path
+    
     # 高级设置
     with st.expander("高级设置", expanded=False):
         similarity_threshold = st.slider("条款匹配相似度阈值", 0.0, 1.0, 0.25, 0.05)
         max_api_retries = st.slider("API最大重试次数", 1, 5, 3)
         chunk_size = st.slider("大文档分块大小（字符）", 2000, 10000, 5000, 500)
+        ocr_dpi = st.slider("OCR识别精度（DPI）", 150, 600, 300, 50)
 
 with st.form("upload_form"):
     st.subheader("基准文件")
@@ -529,7 +623,8 @@ with st.form("upload_form"):
     with st.expander("分析选项", expanded=False):
         analyze_structure = st.checkbox("分析文档结构并生成概述", value=True)
         show_all_matches = st.checkbox("显示所有匹配项（包括低相似度）", value=True)
-        detailed_analysis = st.checkbox("生成详细分析报告", value=True)
+        detailed_analysis = st.checkbox("生成详细分析报告", value=False)  # 默认不生成详细报告
+        force_ocr = st.checkbox("对所有PDF强制使用OCR（即使有文本层）", value=False)
     
     submitted = st.form_submit_button("开始合规性分析")
 
@@ -545,7 +640,13 @@ if submitted and base_file and compare_files:
     with st.spinner("正在解析基准PDF内容，请稍候..."):
         # 显示基准文件处理进度
         progress_bar = st.progress(0)
-        base_text = extract_text_from_pdf(base_file, progress_bar)
+        
+        # 检查是否强制OCR
+        if force_ocr:
+            base_text = extract_text_from_image_pdf(base_file, progress_bar)
+        else:
+            base_text = extract_text_from_pdf(base_file, progress_bar)
+            
         progress_bar.empty()
         
         current_step += 1
@@ -591,7 +692,12 @@ if submitted and base_file and compare_files:
                 # 提取对比文件文本
                 with st.spinner(f"正在提取 {compare_file.name} 的文本内容..."):
                     progress_bar = st.progress(0)
-                    compare_text = extract_text_from_pdf(compare_file, progress_bar)
+                    
+                    if force_ocr:
+                        compare_text = extract_text_from_image_pdf(compare_file, progress_bar)
+                    else:
+                        compare_text = extract_text_from_pdf(compare_file, progress_bar)
+                        
                     progress_bar.empty()
                 
                 current_step += 1
@@ -636,13 +742,12 @@ if submitted and base_file and compare_files:
             with st.spinner("正在生成整体分析报告..."):
                 report_prompt = f"""
                 基于之前对基准文件 {base_file.name} 和对比文件 {[f.name for f in compare_files]} 的分析，
-                请生成一份综合合规性分析报告，包括：
+                请生成一份简洁的综合合规性分析报告（控制在500字以内），包括：
                 1. 整体合规性评估
-                2. 主要冲突点汇总
-                3. 关键差异分析
-                4. 整体改进建议
+                2. 主要冲突点汇总（最多3项）
+                3. 简要改进建议
                 
-                报告应专业、简洁，重点突出。
+                报告应非常简洁，重点突出。
                 """
                 report = call_qwen_api(report_prompt, qwen_api_key)
                 
@@ -674,6 +779,6 @@ st.markdown("""
 }
 </style>
 <div class="footer">
-    中文PDF条款合规性分析工具 | 基于Qwen大模型 | 优化中文文档处理 | 支持一对多分析
+    中文PDF条款合规性分析工具 | 基于Qwen大模型 | 支持图片PDF识别 | 优化中文文档处理
 </div>
 """, unsafe_allow_html=True)
