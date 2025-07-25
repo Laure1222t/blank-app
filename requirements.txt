@@ -4,5 +4,8 @@ jieba==0.42.1
 requests==2.31.0
 python-dotenv==1.0.0
 numpy==1.25.2
-rich==13.7.1  # 明确指定与Streamlit 1.35.0兼容的版本
+rich==13.7.1
+markdown-it-py==2.2.0
+mdurl==0.1.2
+pygments==2.16.1
     
