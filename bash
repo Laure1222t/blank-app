@@ -1,5 +1,5 @@
-# 先卸载冲突的rich版本
-pip uninstall -y rich
+# 赋予执行权限（首次运行）
+chmod +x install.sh
 
-# 再重新安装所有依赖
-pip install -r requirements.txt
+# 执行安装
+./install.sh
