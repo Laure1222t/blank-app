@@ -72,7 +72,7 @@ def call_qwen_api(prompt, api_key, retry=3):
             "model": "qwen-plus",
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens": 1500
+            "max_tokens": 4000
         }
         
         # 带重试机制的API调用
@@ -285,7 +285,7 @@ def analyze_compliance_with_qwen(clause1, clause2, filename1, filename2, api_key
     
     请按照以下结构用中文进行详细分析：
     1. 相似度评估：评估两个条款的相似程度（高/中/低）
-    2. 差异点分析：详细指出两个条款在表述、范围、要求等方面的主要差异
+    2. 差异点分析：简要指出两个条款在表述、范围、要求等方面的主要差异
     3. 合规性判断：判断是否存在冲突（无冲突/轻微冲突/严重冲突）
     4. 冲突原因：如果存在冲突，请具体说明冲突的原因和可能带来的影响
     5. 建议：针对发现的问题，给出专业的处理建议
@@ -358,8 +358,9 @@ def analyze_single_comparison(base_clauses, compare_text, base_name, compare_nam
         
         all_compare_clauses = []
         for i, chunk in enumerate(chunks):
-            # 添加唯一key
-            with st.expander(f"处理块 {i+1}/{len(chunks)}", expanded=False, key=f"chunk_expander_{file_index}_{i}"):
+            # 使用更安全的key命名方式
+            expander_key = f"chunk_exp_{file_index}_{i}"
+            with st.expander(f"处理块 {i+1}/{len(chunks)}", expanded=False, key=expander_key):
                 chunk_clauses = split_into_clauses(chunk, f"{compare_name} (块 {i+1})")
                 st.success(f"块 {i+1} 识别出 {len(chunk_clauses)} 条条款")
                 all_compare_clauses.extend(chunk_clauses)
@@ -407,11 +408,12 @@ def analyze_single_comparison(base_clauses, compare_text, base_name, compare_nam
     with tabs[tab_idx]:
         tab_idx += 1
         
-        # 添加筛选功能 - 添加唯一key
+        # 添加筛选功能 - 使用更安全的key命名方式
+        slider_key = f"sim_slider_{file_index}"
         min_similarity = st.slider(
             "最低相似度筛选", 
             0.0, 1.0, 0.0, 0.05,
-            key=f"similarity_slider_{file_index}"
+            key=slider_key
         )
         filtered_pairs = [p for p in matched_pairs if p[2] >= min_similarity]
         
@@ -438,8 +440,9 @@ def analyze_single_comparison(base_clauses, compare_text, base_name, compare_nam
             with col_b:
                 st.markdown(f'<div class="clause-box"><strong>{compare_name} 条款:</strong><br>{clause2}</div>', unsafe_allow_html=True)
             
-            # 添加分析结果折叠框 - 添加唯一key
-            with st.expander("查看Qwen大模型合规性分析", expanded=False, key=f"analysis_expander_{file_index}_{i}"):
+            # 添加分析结果折叠框 - 使用更安全的key命名方式
+            expander_key = f"analysis_exp_{file_index}_{i}"
+            with st.expander("查看Qwen大模型合规性分析", expanded=False, key=expander_key):
                 with st.spinner("正在调用Qwen大模型进行中文合规性分析..."):
                     analysis = analyze_compliance_with_qwen(clause1, clause2, base_name, compare_name, api_key)
                 
@@ -456,12 +459,13 @@ def analyze_single_comparison(base_clauses, compare_text, base_name, compare_nam
             tab_idx += 1
             st.markdown(f"#### {base_name} 中独有的条款 ({len(unmatched_base)})")
             
-            # 允许用户选择查看特定条款 - 添加唯一key
+            # 允许用户选择查看特定条款 - 使用更安全的key命名方式
+            select_key = f"unmatched_base_sel_{file_index}"
             selected_clause = st.selectbox(
                 "选择要查看的条款",
                 range(len(unmatched_base)),
                 format_func=lambda x: f"条款 {x+1}（{min(50, len(unmatched_base[x]))}字）",
-                key=f"unmatched_base_select_{file_index}"
+                key=select_key
             )
             
             clause = unmatched_base[selected_clause]
@@ -479,12 +483,13 @@ def analyze_single_comparison(base_clauses, compare_text, base_name, compare_nam
             tab_idx += 1
             st.markdown(f"#### {compare_name} 中独有的条款 ({len(unmatched_compare)})")
             
-            # 允许用户选择查看特定条款 - 添加唯一key
+            # 允许用户选择查看特定条款 - 使用更安全的key命名方式
+            select_key = f"unmatched_comp_sel_{file_index}"
             selected_clause = st.selectbox(
                 "选择要查看的条款",
                 range(len(unmatched_compare)),
                 format_func=lambda x: f"条款 {x+1}（{min(50, len(unmatched_compare[x]))}字）",
-                key=f"unmatched_compare_select_{file_index}"
+                key=select_key
             )
             
             clause = unmatched_compare[selected_clause]
@@ -574,8 +579,14 @@ if submitted and base_file and compare_files:
                 
                 base_clauses = []
                 for i, chunk in enumerate(chunks):
-                    # 添加唯一key
-                    with st.expander(f"基准文档处理块 {i+1}/{len(chunks)}", expanded=False, key=f"base_chunk_expander_{i}"):
+                    # 修复：使用更安全的key命名方式，避免潜在的格式问题
+                    expander_key = f"base_chunk_exp_{i}"
+                    # 确保expanded参数是布尔值
+                    with st.expander(
+                        label=f"基准文档处理块 {i+1}/{len(chunks)}", 
+                        expanded=False, 
+                        key=expander_key
+                    ):
                         chunk_clauses = split_into_clauses(chunk, f"{base_file.name} (块 {i+1})")
                         st.success(f"块 {i+1} 识别出 {len(chunk_clauses)} 条条款")
                         base_clauses.extend(chunk_clauses)
