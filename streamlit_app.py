@@ -686,7 +686,7 @@ st.markdown("""
 }
 </style>
 <div class="footer">
-    中文PDF条款合规性分析工具 | 基于Qwen大模型 | 优化中文文档处理 | 支持一对多分析
+    中文PDF条款合规性分析工具 |优化中文文档处理 | 支持一对多分析
 </div>
 """, unsafe_allow_html=True)
     
