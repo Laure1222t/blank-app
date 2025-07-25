@@ -1,4 +1,4 @@
-减少差异性分析import streamlit as st
+import streamlit as st
 from PyPDF2 import PdfReader
 from difflib import SequenceMatcher
 import base64
